@@ -67,12 +67,25 @@ assert_eq "countdown duration ok"  "yes" "$( (( took >= 1 && took <= 4 )) && pri
 TICK=1
 
 # go_to_sleep dry run never touches the system
-assert_eq "go_to_sleep dry run" "DRY RUN: mute + sleep" "$(SLEEPTIMER_DRY_RUN=1 go_to_sleep)"
+assert_eq "go_to_sleep dry run" "DRY RUN: pause + mute + sleep" "$(SLEEPTIMER_DRY_RUN=1 go_to_sleep)"
+
+# pause_media: calls `media-control pause` via a stub on PATH; never fails
+stub_dir=$(mktemp -d)
+print -l '#!/bin/sh' 'echo "$@" > "$STUB_LOG"; exit 1' > $stub_dir/media-control
+chmod +x $stub_dir/media-control
+export STUB_LOG=$stub_dir/log
+( path=($stub_dir $path); pause_media )
+assert_eq "pause_media sends pause" "pause" "$(<$STUB_LOG)"
+assert_eq "pause_media ignores tool failure" "0" "$( path=($stub_dir $path); pause_media; print $? )"
+assert_eq "pause_media missing tool ok" "0" "$( path=(/nonexistent); pause_media 2>/dev/null; print $? )"
+assert_eq "pause_media missing tool tip" "yes" \
+  "$( path=(/nonexistent); [[ $(pause_media 2>&1) == *'brew install media-control'* ]] && print yes )"
+rm -rf $stub_dir
 
 # end-to-end: executed script with piped input, dry run
 e2e=$(print -l s 1 | SLEEPTIMER_DRY_RUN=1 zsh "${0:A:h}/../sleeptimer" 2>/dev/null)
 assert_eq "e2e announces" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
-assert_eq "e2e dry-runs"  "yes" "$([[ $e2e == *'DRY RUN: mute + sleep'* ]] && print yes)"
+assert_eq "e2e dry-runs"  "yes" "$([[ $e2e == *'DRY RUN: pause + mute + sleep'* ]] && print yes)"
 
 print
 (( fails == 0 )) && print "All tests passed" || print "$fails test(s) failed"
