@@ -1,0 +1,45 @@
+#!/usr/bin/env zsh
+# sleeptimer — count down with a progress bar, then mute and put the Mac to sleep.
+
+zmodload zsh/datetime  # provides $EPOCHSECONDS
+
+BAR_WIDTH=${SLEEPTIMER_BAR_WIDTH:-30}
+TICK=${SLEEPTIMER_TICK:-1}
+
+# to_seconds <unit> <amount> — prints seconds; returns 1 on invalid input.
+to_seconds() {
+  local unit=${${(L)1}[1]} amount=$2
+  [[ $amount == <1-> ]] || return 1
+  case $unit in
+    s) print $amount ;;
+    m) print $(( amount * 60 )) ;;
+    h) print $(( amount * 3600 )) ;;
+    *) return 1 ;;
+  esac
+}
+
+# fmt_time <seconds> — MM:SS, or H:MM:SS for an hour or more.
+fmt_time() {
+  local s=$1
+  if (( s >= 3600 )); then
+    printf '%d:%02d:%02d' $(( s / 3600 )) $(( s % 3600 / 60 )) $(( s % 60 ))
+  else
+    printf '%02d:%02d' $(( s / 60 )) $(( s % 60 ))
+  fi
+}
+
+# render_bar <elapsed> <total> — e.g. "[#####-----]  50%  00:30 left"
+render_bar() {
+  local elapsed=$1 total=$2
+  (( elapsed > total )) && elapsed=$total
+  local pct=$(( elapsed * 100 / total ))
+  local filled=$(( elapsed * BAR_WIDTH / total ))
+  local bar="${(l:filled::#:)}${(l:$(( BAR_WIDTH - filled ))::-:)}"
+  printf '[%s] %3d%%  %s left' "$bar" $pct "$(fmt_time $(( total - elapsed )))"
+}
+
+main() {
+  :
+}
+
+[[ $ZSH_EVAL_CONTEXT == toplevel ]] && main "$@"
