@@ -9,7 +9,7 @@ TICK=${SLEEPTIMER_TICK:-1}
 # to_seconds <unit> <amount> — prints seconds; returns 1 on invalid input.
 to_seconds() {
   local unit=${${(L)1}[1]} amount=$2
-  [[ $amount == <1-> ]] || return 1
+  [[ $amount == <1-> ]] && (( ${#amount} <= 6 )) || return 1
   case $unit in
     s) print $amount ;;
     m) print $(( amount * 60 )) ;;
@@ -82,7 +82,7 @@ go_to_sleep() {
 main() {
   trap 'print "\nCancelled — not sleeping."; exit 130' INT
   local secs
-  secs=$(ask_duration) || exit 1
+  secs=$(ask_duration) || { print; exit 1 }
   print "Sleeping in $(fmt_time $secs). Ctrl+C to cancel."
   countdown $secs
   go_to_sleep

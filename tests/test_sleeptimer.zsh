@@ -33,6 +33,9 @@ assert_fails "to_seconds decimal"   to_seconds m 1.5
 assert_fails "to_seconds letters"   to_seconds m abc
 assert_fails "to_seconds empty"     to_seconds m ""
 assert_fails "to_seconds bad unit"  to_seconds x 5
+assert_fails "to_seconds overflow" to_seconds h 99999999999999999999999
+assert_fails "to_seconds 7 digits" to_seconds s 1000000
+assert_eq "to_seconds 6 digits" "999999" "$(to_seconds s 999999)"
 
 # fmt_time
 assert_eq "fmt_time secs"   "00:05"    "$(fmt_time 5)"
