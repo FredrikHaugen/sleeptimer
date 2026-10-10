@@ -46,6 +46,31 @@ assert_eq "bar half"     "[#####-----]  50%  00:30 left"  "$(render_bar 30 60)"
 assert_eq "bar full"     "[##########] 100%  00:00 left"  "$(render_bar 60 60)"
 assert_eq "bar overflow" "[##########] 100%  00:00 left"  "$(render_bar 99 60)"
 
+# ask_duration: re-prompts on bad unit and bad amount; accepts word units
+assert_eq "ask_duration retries" "180" \
+  "$(print -l x Minutes abc 0 3 | ask_duration 2>/dev/null)"
+assert_eq "ask_duration hours"   "7200" \
+  "$(print -l h 2 | ask_duration 2>/dev/null)"
+assert_fails "ask_duration EOF" ask_duration </dev/null
+
+# countdown: wall-clock based, so a 0.3s tick still finishes ~on time and ends at 100%
+TICK=0.3
+t0=$EPOCHSECONDS
+out=$(countdown 2)
+took=$(( EPOCHSECONDS - t0 ))
+assert_eq "countdown ends at 100%" "yes" "$([[ $out == *'100%  00:00 left'* ]] && print yes)"
+assert_eq "countdown starts at 0%" "yes" "$([[ $out == *'[----------]   0%'* ]] && print yes)"
+assert_eq "countdown duration ok"  "yes" "$( (( took >= 1 && took <= 4 )) && print yes )"
+TICK=1
+
+# go_to_sleep dry run never touches the system
+assert_eq "go_to_sleep dry run" "DRY RUN: mute + sleep" "$(SLEEPTIMER_DRY_RUN=1 go_to_sleep)"
+
+# end-to-end: executed script with piped input, dry run
+e2e=$(print -l s 1 | SLEEPTIMER_DRY_RUN=1 zsh "${0:A:h}/../sleeptimer" 2>/dev/null)
+assert_eq "e2e announces" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
+assert_eq "e2e dry-runs"  "yes" "$([[ $e2e == *'DRY RUN: mute + sleep'* ]] && print yes)"
+
 print
 (( fails == 0 )) && print "All tests passed" || print "$fails test(s) failed"
 exit $(( fails > 0 ))
