@@ -379,6 +379,65 @@ cancel() {
   exit 130
 }
 
+# yolo_cmd [off] — keep the Mac awake (lid closed too) until Ctrl+C; "off" turns sleep back on for good.
+yolo_cmd() {
+  case $1 in
+    '') ;;
+    off) yolo_off; return ;;
+    *) print -u2 "Unknown: sleeptimer yolo $1 (try: sleeptimer yolo, or sleeptimer yolo off)"; return 2 ;;
+  esac
+  local lid=1
+  YOLO_PREV=$(sleep_disabled)
+  print -r -- "YOLO mode: your Mac stays awake and the screen stays on until you press Ctrl+C."
+  print -r -- "Don't put it in a bag while this runs. It won't sleep and can get very hot."
+  if (( ! YOLO_PREV )); then
+    print -r -- "To stay awake with the lid closed, macOS needs your admin password (used only for: pmset disablesleep)."
+    if sudo -v; then
+      nohup sudo -n zsh -c "$(yolo_guard $$ $YOLO_PREV)" >/dev/null 2>&1 &!
+    else
+      lid=0
+      print -u2 "No admin rights, so closing the lid will still put the Mac to sleep."
+    fi
+  fi
+  caffeinate -dims -w $$ >/dev/null 2>&1 &!
+  YOLO_START=$EPOCHSECONDS
+  trap yolo_stop INT TERM HUP
+  use_tui && screen_enter
+  local -a size
+  while true; do
+    if (( IN_TUI )); then
+      size=($(term_size))
+      draw_frame "$(render_yolo $(( EPOCHSECONDS - YOLO_START )) $size[1] $size[2] $lid)"
+    else
+      printf '\rAwake for %s  (Ctrl+C to stop)\e[K' "$(fmt_time $(( EPOCHSECONDS - YOLO_START )))"
+    fi
+    sleep $TICK
+  done
+}
+
+# yolo_stop — leave YOLO mode; the root guard and caffeinate notice the exit and undo themselves.
+yolo_stop() {
+  screen_leave
+  print -r -- $'\n'"YOLO off after $(fmt_time $(( EPOCHSECONDS - YOLO_START )))."
+  if (( YOLO_PREV )); then
+    print -r -- "Sleep was already turned off before YOLO, so it stays off. To turn it on: sleeptimer yolo off"
+  else
+    print -r -- "Your Mac can sleep again."
+  fi
+  exit 0
+}
+
+# yolo_off — turn system sleep back on (pmset disablesleep 0), e.g. after a crash or restart during YOLO.
+yolo_off() {
+  if (( ! $(sleep_disabled) )); then
+    print "Sleep is already on. Nothing to do."
+    return 0
+  fi
+  print -r -- "Turning sleep back on needs your admin password (runs: pmset -a disablesleep 0)."
+  sudo pmset -a disablesleep 0 || { print -u2 "Couldn't turn sleep back on."; return 1 }
+  print "Sleep is back on."
+}
+
 usage() {
   print -r -- "sleeptimer — count down, then pause media, mute and put the Mac to sleep.
 
@@ -387,6 +446,8 @@ Usage:
   sleeptimer <time>          start right away: 45, 90s, 30m, 1,5h, 2 hours
   sleeptimer themes          list the themes and pick one
   sleeptimer themes <name>   switch theme: ${(j:, :)THEME_NAMES}
+  sleeptimer yolo            keep the Mac awake, even with the lid closed, until Ctrl+C
+  sleeptimer yolo off        turn sleep back on if it got stuck off
   sleeptimer -h              show this help
 
 Times:
@@ -427,6 +488,7 @@ main() {
   case $1 in
     -h|--help|help) usage; return 0 ;;
     themes) shift; themes_cmd "$@"; return ;;
+    yolo) shift; yolo_cmd "$@"; return ;;
     -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
   esac
   trap cancel INT TERM HUP

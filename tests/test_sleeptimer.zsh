@@ -291,6 +291,58 @@ assert_eq "yolo lid open text"    "yes" \
 assert_eq "yolo centered" "yes" "$([[ $yframe == $'\n'* ]] && print yes)"
 assert_eq "yolo tiny fallback" "awake 01:05" "$(render_yolo 65 20 5 1)"
 
+# end-to-end: yolo turns sleep off, keeps the Mac awake, and puts everything back however it ends
+yolo_run() {  # yolo_run <signal> [env...] — run "sleeptimer yolo" ~1.5s, stop it, let the guard settle; sets yrc, yout, ylog
+  local out=$(mktemp)
+  : > $FAKE_LOG
+  env PATH=$fake_bin:$PATH SLEEPTIMER_TUI=0 SLEEPTIMER_TICK=0.2 "${@:2}" zsh $SCRIPT yolo >$out 2>&1 &
+  local pid=$!
+  sleep 1.5
+  kill -$1 $pid
+  wait $pid
+  yrc=$?
+  sleep 2.5
+  yout=$(<$out) ylog=$(<$FAKE_LOG)
+  rm -f $out
+}
+yolo_run TERM
+assert_eq "yolo exit 0"            "0"   "$yrc"
+assert_eq "yolo asks for admin"    "yes" "$([[ $ylog == *'sudo -v'* ]] && print yes)"
+assert_eq "yolo disables sleep"    "yes" "$([[ $ylog == *'pmset -a disablesleep 1'* ]] && print yes)"
+assert_eq "yolo restores sleep"    "yes" "$([[ $ylog == *'disablesleep 1'*'pmset -a disablesleep 0'* ]] && print yes)"
+assert_eq "yolo caffeinates"       "yes" "$([[ $ylog == *'caffeinate -dims -w '[0-9]* ]] && print yes)"
+assert_eq "yolo warns about heat"  "yes" "$([[ $yout == *"Don't put it in a bag"* ]] && print yes)"
+assert_eq "yolo shows time awake"  "yes" "$([[ $yout == *'Awake for 00:0'* ]] && print yes)"
+assert_eq "yolo stop message"      "yes" "$([[ $yout == *'YOLO off after'*'Your Mac can sleep again.'* ]] && print yes)"
+
+yolo_run KILL
+assert_eq "yolo kill -9 still restores" "yes" "$([[ $ylog == *'disablesleep 1'*'pmset -a disablesleep 0'* ]] && print yes)"
+
+yolo_run TERM STUB_SLEEP_DISABLED=1
+assert_eq "yolo already off: no sudo"     "no"  "$([[ $ylog == *sudo* ]] && print yes || print no)"
+assert_eq "yolo already off: no pmset"    "no"  "$([[ $ylog == *disablesleep* ]] && print yes || print no)"
+assert_eq "yolo already off: stays off"   "yes" "$([[ $yout == *'already turned off before YOLO, so it stays off'* ]] && print yes)"
+
+yolo_run TERM STUB_SUDO_RC=1
+assert_eq "yolo no admin: no pmset"       "no"  "$([[ $ylog == *disablesleep* ]] && print yes || print no)"
+assert_eq "yolo no admin: lid warning"    "yes" "$([[ $yout == *'closing the lid will still put the Mac to sleep'* ]] && print yes)"
+assert_eq "yolo no admin: still awake"    "yes" "$([[ $ylog == *'caffeinate -dims'* ]] && print yes)"
+
+yolo_run TERM SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20
+assert_eq "yolo tui enters alt screen"    "yes" "$([[ $yout == *$'\e[?1049h'*'awake for'* ]] && print yes)"
+assert_eq "yolo tui restores terminal"    "yes" "$([[ $yout == *$'\e[?25h\e[?1049l'*'YOLO off'* ]] && print yes)"
+
+assert_eq "yolo bad arg exit 2" "2" "$(run yolo nope >/dev/null 2>&1; print $?)"
+
+# yolo off: turns sleep back on only when it is off
+: > $FAKE_LOG
+assert_eq "yolo off when on"  "yes" "$([[ $(run yolo off) == *'already on'* ]] && print yes)"
+assert_eq "yolo off no sudo"  ""    "$(<$FAKE_LOG)"
+assert_eq "yolo off when off" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 run yolo off) == *'Sleep is back on.'* ]] && print yes)"
+assert_eq "yolo off runs pmset" "yes" "$( grep -qx 'sudo pmset -a disablesleep 0' $FAKE_LOG && print yes )"
+assert_eq "yolo off sudo fails" "1" "$(STUB_SLEEP_DISABLED=1 STUB_SUDO_RC=1 run yolo off >/dev/null 2>&1; print $?)"
+assert_eq "help mentions yolo"  "yes" "$([[ $(run -h) == *'sleeptimer yolo off'* ]] && print yes)"
+
 # normal timer warns when sleep is turned off system-wide
 assert_eq "timer warns if sleep off" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 run 1s 2>&1) == *'Heads up: sleep is turned off'*'sleeptimer yolo off'* ]] && print yes)"
 assert_eq "timer quiet if sleep on"  "no"  "$([[ $(run 1s 2>&1) == *'Heads up'* ]] && print yes || print no)"
