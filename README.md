@@ -179,6 +179,7 @@ sleeptimer yolo
 
 If your Mac ever refuses to sleep afterwards (for example, it restarted while
 YOLO was on), type **`sleeptimer yolo off`**.
+The next `sleeptimer yolo` also notices this and turns sleep back on when you stop it.
 
 ---
 
@@ -208,6 +209,7 @@ click the speaker icon at the top of the screen.
 | `Time ran out while your Mac was asleep, so it won't go to sleep now.` | The Mac went to sleep on its own (for example, you closed the lid) before the timer ended. sleeptimer doesn't mute it or put it back to sleep when you wake it. Nothing to fix. |
 | `The timer ended late, so it won't put your Mac to sleep now.` | The timer was paused (for example with Control + Z) or the clock changed, so it ended more than a minute late. It doesn't mute or sleep the Mac by surprise. Start it again if you still want it. |
 | `Sleep is still turned off.` after YOLO | Type `sleeptimer yolo off` and enter your Mac password. |
+| `The keep-awake helper (caffeinate) stopped unexpectedly, so YOLO has ended.` | Something stopped the part that keeps the Mac awake. Your Mac can sleep normally again. Start `sleeptimer yolo` again if you still need it. |
 | `Tip: brew install media-control ...` when the timer ends | Only Apple Music and Spotify were paused, because Step 4 was skipped. Do **Step 4** to pause YouTube and other players too. |
 | Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. For Apple Music or Spotify, check **System Settings → Privacy & Security → Automation** and allow Terminal to control them. |
 | `Couldn't pause Music. ...` (or Spotify) | The app didn't answer within 3 seconds, or Terminal isn't allowed to control it. Allow Terminal in **System Settings → Privacy & Security → Automation**. The Mac still went to sleep. |

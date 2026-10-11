@@ -318,11 +318,17 @@ draw_screen() {
   draw_frame "$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)"
 }
 
+# kern_secs <name> — the seconds of a kernel timestamp such as kern.waketime or kern.boottime; fails if unknown.
+kern_secs() {
+  local line
+  line=$(sysctl -n $1 2>/dev/null) || return 1
+  [[ $line =~ 'sec = ([0-9]+)' ]] && print $match[1]
+}
+
 # woke_after <epoch> — true if the Mac last woke from sleep after <epoch> (kern.waketime); false if unknown.
 woke_after() {
-  local line
-  line=$(sysctl -n kern.waketime 2>/dev/null) || return 1
-  [[ $line =~ 'sec = ([0-9]+)' ]] && (( match[1] > $1 ))
+  local t
+  t=$(kern_secs kern.waketime) && (( t > $1 ))
 }
 
 # countdown <total> — redraw until total seconds of wall-clock time pass. Returns 1 if the Mac woke from
@@ -373,10 +379,11 @@ wait_sleep_state() {
 
 # yolo_guard <pid> <prev> — the root command YOLO runs: turn sleep off, then put <prev> back once <pid>
 # (YOLO's caffeinate, which exits with the script) is gone. It polls instead of trapping, so it still
-# restores after kill -9 or a closed window.
+# restores after kill -9 or a closed window. It compares the process start time, so a later process
+# that reuses the pid doesn't keep sleep off.
 # Fixed PATH and detached stdio: root must not run the user's pmset, or die on a closed pipe.
 yolo_guard() {
-  print -r -- "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; pmset -a disablesleep 1; while kill -0 $1 2>/dev/null; do sleep 1; done; pmset -a disablesleep $2"
+  print -r -- "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; t=\$(ps -p $1 -o lstart= 2>/dev/null); pmset -a disablesleep 1; while [ -n \"\$t\" ] && [ \"\$(ps -p $1 -o lstart= 2>/dev/null)\" = \"\$t\" ]; do sleep 1; done; pmset -a disablesleep $2"
 }
 
 MEDIA_APPS=(Music Spotify)  # paused directly with AppleScript when they're open, media-control or not
@@ -537,6 +544,21 @@ hangup() {
   exit 129  # 128 + SIGHUP, the usual status for a hangup
 }
 
+# yolo_marker — file that records a running YOLO ("<pid> <previous SleepDisabled> <boot time>"), so a YOLO
+# cut short by a restart (the root guard dies too, before it can restore) is recognised next time.
+yolo_marker() { print -r -- ${CONFIG:h}/yolo }
+
+# yolo_leftover — if a YOLO from before the last restart never finished, prints the SleepDisabled value
+# from before it. A marker from this boot means the guard already restored (e.g. after kill -9).
+# Stale markers are removed; prints nothing when there's nothing to fix.
+yolo_leftover() {
+  local -a m
+  m=($(<$(yolo_marker))) 2>/dev/null || return 0
+  kill -0 $m[1] 2>/dev/null && return 0  # that YOLO is still running
+  rm -f $(yolo_marker)
+  [[ $m[2] == [01] && $m[3] != $(kern_secs kern.boottime) ]] && print $m[2]
+}
+
 # yolo_cmd [off] — keep the Mac awake (lid closed too) until Ctrl+C; "off" turns sleep back on for good.
 yolo_cmd() {
   case $1 in
@@ -545,7 +567,12 @@ yolo_cmd() {
     *) print -u2 "Unknown: sleeptimer yolo $1 (try: sleeptimer yolo, or sleeptimer yolo off)"; return 2 ;;
   esac
   local lid=1
-  YOLO_PREV=$(sleep_disabled) YOLO_START=$EPOCHSECONDS YOLO_CAFF=
+  YOLO_PREV=$(sleep_disabled) YOLO_START=$EPOCHSECONDS YOLO_CAFF= YOLO_LOST=0
+  local leftover=$(yolo_leftover)
+  if [[ $leftover == 0 ]] && (( YOLO_PREV )); then
+    YOLO_PREV=0
+    print -r -- "A YOLO session that didn't finish (maybe the Mac restarted) left sleep turned off. It will be turned back on when you stop YOLO."
+  fi
   trap yolo_stop INT TERM HUP
   print -r -- "YOLO mode: your Mac stays awake and the screen stays on until you press Ctrl+C."
   print -r -- "Don't put it in a bag while this runs. It won't sleep and can get very hot."
@@ -558,6 +585,7 @@ yolo_cmd() {
       print -r -- "To stay awake with the lid closed, macOS needs your admin password (used only for: pmset disablesleep)."
       if sudo -v; then
         nohup sudo -n /bin/zsh -f -c "$(yolo_guard $YOLO_CAFF $YOLO_PREV)" >/dev/null 2>&1 &!
+        { mkdir -p ${CONFIG:h} && print "$$ $YOLO_PREV $(kern_secs kern.boottime)" > $(yolo_marker) } 2>/dev/null
         if ! wait_sleep_state 1; then
           lid=0
           print -u2 "Couldn't block lid-close sleep, so closing the lid will still put the Mac to sleep."
@@ -577,6 +605,10 @@ yolo_cmd() {
     else
       printf '\rAwake for %s  (Ctrl+C to stop)\e[K' "$(fmt_time $(( EPOCHSECONDS - YOLO_START )))"
     fi
+    if [[ -n $YOLO_CAFF ]] && ! kill -0 $YOLO_CAFF 2>/dev/null; then
+      YOLO_LOST=1
+      yolo_stop
+    fi
     sleep $TICK
   done
 }
@@ -588,14 +620,17 @@ yolo_stop() {
   [[ -n $YOLO_CAFF ]] && kill $YOLO_CAFF 2>/dev/null
   screen_leave
   print -r -- $'\n'"YOLO off after $(fmt_time $(( EPOCHSECONDS - YOLO_START )))."
+  (( YOLO_LOST )) && print -u2 "The keep-awake helper (caffeinate) stopped unexpectedly, so YOLO has ended."
   if (( YOLO_PREV )); then
     print -r -- "Sleep was already turned off before YOLO, so it stays off. To turn it on: sleeptimer yolo off"
   elif wait_sleep_state 0; then
+    rm -f $(yolo_marker)
     print -r -- "Your Mac can sleep again."
   else
     print -u2 "Sleep is still turned off. To turn it back on: sleeptimer yolo off"
     exit 1
   fi
+  (( YOLO_LOST )) && exit 1
   exit 0
 }
 
@@ -611,6 +646,7 @@ yolo_off() {
   fi
   print -r -- "Turning sleep back on needs your admin password (runs: pmset -a disablesleep 0)."
   sudo pmset -a disablesleep 0 || { print -u2 "Couldn't turn sleep back on."; return 1 }
+  rm -f $(yolo_marker)
   print "Sleep is back on."
 }
 

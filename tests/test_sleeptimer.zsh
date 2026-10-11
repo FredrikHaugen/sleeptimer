@@ -65,6 +65,7 @@ print -l '#!/bin/sh' \
   'exit 1' > $fake_bin/pgrep
 print -l '#!/bin/sh' \
   '[ "$2" = "kern.waketime" ] && echo "{ sec = ${STUB_WAKETIME:-0}, usec = 0 } Thu Jan  1 00:00:00 1970"' \
+  '[ "$2" = "kern.boottime" ] && echo "{ sec = 1000, usec = 0 } Thu Jan  1 00:16:40 1970"' \
   'exit 0' > $fake_bin/sysctl
 chmod +x $fake_bin/*
 
@@ -477,8 +478,13 @@ assert_eq "sleep_disabled no pmset" "0" "$( path=(/nonexistent); sleep_disabled 
 
 # yolo_guard: restores the previous value once the pid is gone
 assert_eq "yolo_guard command" \
-  "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; pmset -a disablesleep 1; while kill -0 42 2>/dev/null; do sleep 1; done; pmset -a disablesleep 0" \
+  "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; t=\$(ps -p 42 -o lstart= 2>/dev/null); pmset -a disablesleep 1; while [ -n \"\$t\" ] && [ \"\$(ps -p 42 -o lstart= 2>/dev/null)\" = \"\$t\" ]; do sleep 1; done; pmset -a disablesleep 0" \
   "$(yolo_guard 42 0)"
+# the guard tells caffeinate from a later process that got the same pid, by its start time
+assert_eq "yolo_guard ends when the pid is reused" "0" \
+  "$( sleep 5 & p=$!; g=$(yolo_guard $p 0); g=${g//pmset -a disablesleep/: }
+      zsh -fc "${g/exec >\/dev\/null 2>&1 <\/dev\/null;/}" & gp=$!; sleep 0.5; kill $p; wait $p 2>/dev/null
+      sleep 1.5; kill -0 $gp 2>/dev/null && { kill $gp; print 1 } || print 0 )"
 
 # render_yolo: big "time awake", lid status, centered, never wider than the terminal
 yolo_ok() {  # yolo_ok <cols> <rows> — prints "<lines<=rows> <widest<=cols>" as 1/0
@@ -529,7 +535,7 @@ assert_eq "yolo stop message"      "yes" "$([[ $yout == *'YOLO off after'*'Your 
 assert_eq "yolo stop waits for sleep to be back" "0" "$ystate"
 assert_eq "yolo stop ends caffeinate" "yes" "$([[ $ylog == *'caffeinate stopped'* ]] && print yes)"
 cpid=${${(M)${(f)ylog}:#caffeinate pid *}#caffeinate pid }
-assert_eq "yolo guard watches caffeinate" "yes" "$([[ -n $cpid && $ylog == *"while kill -0 $cpid "* ]] && print yes)"
+assert_eq "yolo guard watches caffeinate" "yes" "$([[ -n $cpid && $ylog == *"ps -p $cpid -o lstart="* ]] && print yes)"
 
 yolo_run KILL
 assert_eq "yolo kill -9 still restores" "yes" "$([[ $ylog == *'disablesleep 1'*'pmset -a disablesleep 0'* ]] && print yes)"
@@ -556,6 +562,34 @@ ywait=1.5
 assert_eq "yolo guard failed: lid warning" "yes" "$([[ $yout == *"Couldn't block lid-close sleep"* ]] && print yes)"
 assert_eq "yolo guard failed: no pmset"    "no"  "$(grep -q '^pmset -a disablesleep' <<< $ylog && print yes || print no)"
 
+ymark=${SLEEPTIMER_CONFIG:h}/yolo
+assert_eq "yolo marker gone after a clean stop" "no" "$([[ -e $ymark ]] && print yes || print no)"
+
+# a YOLO that never finished (the Mac restarted) left sleep off: the next YOLO turns it back on at the end
+print "999999 0 1" > $ymark  # booted at 1 then; the fake sysctl says this boot started at 1000
+yolo_run TERM STUB_SLEEP_DISABLED=1
+assert_eq "yolo leftover: says so"       "yes" "$([[ $yout == *'left sleep turned off'* ]] && print yes)"
+assert_eq "yolo leftover: restores on"   "yes" "$([[ $ylog == *'pmset -a disablesleep 0'* ]] && print yes)"
+assert_eq "yolo leftover: marker gone"   "no"  "$([[ -e $ymark ]] && print yes || print no)"
+# ...but a marker from this boot (kill -9: the guard already restored) is not a leftover
+print "999999 0 1000" > $ymark
+yolo_run TERM STUB_SLEEP_DISABLED=1
+assert_eq "yolo same-boot marker: no sudo" "no" "$([[ $ylog == *sudo* ]] && print yes || print no)"
+assert_eq "yolo same-boot marker: cleaned" "no" "$([[ -e $ymark ]] && print yes || print no)"
+
+# caffeinate dying on its own ends YOLO honestly instead of claiming the Mac is still kept awake
+: > $FAKE_LOG; rm -f $FAKE_STATE
+ylost=$(mktemp)
+env PATH=$fake_bin:$PATH SLEEPTIMER_TUI=0 SLEEPTIMER_TICK=0.2 zsh $SCRIPT yolo >$ylost 2>&1 &
+pid=$!
+sleep 1.5
+kill ${${(M)${(f)"$(<$FAKE_LOG)"}:#caffeinate pid *}#caffeinate pid }
+sleep 4
+assert_eq "yolo lost caffeinate: exits by itself" "no" "$(kill -0 $pid 2>/dev/null && print yes || print no)"
+kill $pid 2>/dev/null; wait $pid
+assert_eq "yolo lost caffeinate: says so" "yes" "$([[ $(<$ylost) == *'stopped unexpectedly'* ]] && print yes)"
+rm -f $ylost; sleep 1.5
+
 yolo_run TERM SLEEPTIMER_DRY_RUN=1
 assert_eq "yolo dry run: no sudo"        "no"  "$([[ $ylog == *sudo* ]] && print yes || print no)"
 assert_eq "yolo dry run: no caffeinate"  "no"  "$([[ $ylog == *caffeinate* ]] && print yes || print no)"
@@ -579,7 +613,9 @@ yrun() { PATH=$fake_bin:$PATH SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
 : > $FAKE_LOG; rm -f $FAKE_STATE
 assert_eq "yolo off when on"  "yes" "$([[ $(yrun yolo off) == *'already on'* ]] && print yes)"
 assert_eq "yolo off no sudo"  ""    "$(<$FAKE_LOG)"
+print "999999 0" > $ymark
 assert_eq "yolo off when off" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 yrun yolo off) == *'Sleep is back on.'* ]] && print yes)"
+assert_eq "yolo off clears the marker" "no" "$([[ -e $ymark ]] && print yes || print no)"
 assert_eq "yolo off runs pmset" "yes" "$( grep -qx 'sudo pmset -a disablesleep 0' $FAKE_LOG && print yes )"
 rm -f $FAKE_STATE
 assert_eq "yolo off sudo fails" "1" "$(STUB_SLEEP_DISABLED=1 STUB_SUDO_RC=1 yrun yolo off >/dev/null 2>&1; print $?)"
