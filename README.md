@@ -1,7 +1,8 @@
 # sleeptimer
 
 **A sleep timer for your Mac.** Tell it how long to wait, and when the time is
-up it **turns the sound off** and **puts your Mac to sleep**. It's handy when
+up it **pauses whatever is playing**, **turns the sound off** and **puts your
+Mac to sleep**. It's handy when
 you fall asleep to a video, music or a stream.
 
 While it waits, it shows a bar that fills up so you can see how long is left:
@@ -14,7 +15,7 @@ You only have to set it up once. After that, using it takes about 5 seconds.
 
 ---
 
-## Part 1: Setup (one time only, about 2 minutes)
+## Part 1: Setup (one time only, about 3 minutes)
 
 ### Step 1: Download it
 
@@ -49,6 +50,22 @@ echo "✅ Installed! Now close this Terminal window and open a new one."
 When you see **✅ Installed!**, quit Terminal with **⌘ Command + Q** and open it
 again as in Step 2. Terminal only picks up the new command in a fresh window.
 
+### Step 4: Let it pause music and videos (recommended)
+
+This step lets sleeptimer **pause** Spotify, Apple Music, YouTube and other
+players before the Mac sleeps, so nothing starts playing again when you wake it.
+It needs [Homebrew](https://brew.sh). If you don't have Homebrew, install it
+first using the instructions on that page.
+
+Paste this into Terminal and press **Return**:
+
+```
+brew install media-control
+```
+
+If you skip this step, sleeptimer still mutes the sound and puts the Mac to
+sleep, but it doesn't pause anything.
+
 You're done with setup. You can delete the ZIP and the `sleeptimer-master`
 folder from Downloads if you like.
 
@@ -77,7 +94,8 @@ Sleeping in 45:00. Ctrl+C to cancel.
 **Leave the Terminal window open.** You can minimize it with the yellow button,
 but don't close it, or the timer stops.
 
-When the bar reaches 100%, the sound turns off and the Mac goes to sleep.
+When the bar reaches 100%, whatever is playing gets paused, the sound turns off
+and the Mac goes to sleep.
 
 ---
 
@@ -86,11 +104,13 @@ When the bar reaches 100%, the sound turns off and the Mac goes to sleep.
 Click the Terminal window and press **Control + C**. That's the **control**
 key, not Command.
 
-You'll see `Cancelled — not sleeping.`, and nothing gets muted or put to sleep.
+You'll see `Cancelled — not sleeping.`, and nothing gets paused, muted or put to sleep.
 
 ---
 
 ## When you wake the Mac up
+
+**Your music or video is paused.** Press play when you want it again.
 
 **The sound is still off.** That's on purpose. To turn it back on, press the
 **mute key** or **volume-up key** on your keyboard (F10–F12 on most Macs), or
@@ -106,6 +126,8 @@ click the speaker icon at the top of the screen.
 | `cp: ... No such file or directory` during setup | The ZIP wasn't unzipped, or it's not in Downloads. Go back to **Step 1** and double-click the ZIP in your Downloads folder. |
 | It keeps asking the same question again | It didn't understand your answer. For the unit, type only `s`, `m` or `h`. For the amount, type a whole number like `30`, not `30.5`, `half` or `0`. |
 | The timer stopped by itself | The Terminal window was probably closed. Start it again and leave the window open. |
+| `Tip: brew install media-control ...` when the timer ends | Nothing was paused because Step 4 was skipped. Do **Step 4** if you want pausing. |
+| Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. |
 | I want a different time | Press **Control + C** to cancel, then run `sleeptimer` again. |
 
 ---
@@ -115,7 +137,7 @@ click the speaker icon at the top of the screen.
 <details>
 <summary>Tests, test mode and settings</summary>
 
-Run the tests from the project folder. They never really mute or sleep the Mac:
+Run the tests from the project folder. They never really pause, mute or sleep the Mac:
 
 ```
 zsh tests/test_sleeptimer.zsh
@@ -125,7 +147,7 @@ Environment variables:
 
 | Variable | What it does | Default |
 |---|---|---|
-| `SLEEPTIMER_DRY_RUN` | Any non-empty value prints a message instead of muting and sleeping | off |
+| `SLEEPTIMER_DRY_RUN` | Any non-empty value prints a message instead of pausing, muting and sleeping | off |
 | `SLEEPTIMER_TICK` | Seconds between progress-bar redraws | `1` |
 | `SLEEPTIMER_BAR_WIDTH` | Number of characters in the bar | `30` |
 
@@ -134,6 +156,7 @@ Example: `SLEEPTIMER_DRY_RUN=1 sleeptimer`
 When the timer ends, it runs exactly:
 
 ```
+media-control pause   # skipped (with a tip) if media-control isn't installed; errors ignored
 osascript -e "set volume with output muted" && pmset sleepnow
 ```
 

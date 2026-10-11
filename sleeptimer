@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# sleeptimer — count down with a progress bar, then mute and put the Mac to sleep.
+# sleeptimer — count down with a progress bar, then pause media, mute and put the Mac to sleep.
 
 zmodload zsh/datetime  # provides $EPOCHSECONDS
 
@@ -71,11 +71,23 @@ countdown() {
   printf '\r%s\e[K\n' "$(render_bar $total $total)"
 }
 
+# pause_media — pause whatever is "Now Playing" (needs `brew install media-control`).
+# Never fails: a missing tool or nothing playing must not stop the Mac sleeping.
+pause_media() {
+  if (( ! $+commands[media-control] )); then
+    print -u2 "Tip: brew install media-control to also pause music and videos."
+    return 0
+  fi
+  media-control pause 2>/dev/null
+  return 0
+}
+
 go_to_sleep() {
   if [[ -n $SLEEPTIMER_DRY_RUN ]]; then
-    print "DRY RUN: mute + sleep"
+    print "DRY RUN: pause + mute + sleep"
     return
   fi
+  pause_media
   osascript -e "set volume with output muted" && pmset sleepnow
 }
 
