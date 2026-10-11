@@ -46,6 +46,7 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 | `SLEEPTIMER_TUI` | `1`/`0` forces full-screen or one-line mode |
 | `SLEEPTIMER_COLS` / `SLEEPTIMER_ROWS` | Fake terminal size |
 | `SLEEPTIMER_TICK` | Seconds between redraws |
+| `SLEEPTIMER_GRACE` | Seconds late before `countdown` returns 1 (Mac slept through the deadline) |
 | `SLEEPTIMER_BAR_WIDTH` | One-line bar width |
 
 Tests call `apply_theme classic` so expected strings are plain `#`/`-` with no escape codes.

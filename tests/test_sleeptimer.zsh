@@ -203,6 +203,8 @@ took=$(( EPOCHSECONDS - t0 ))
 assert_eq "countdown ends at 100%" "yes" "$([[ $out == *'100%  00:00 left'* ]] && print yes)"
 assert_eq "countdown starts at 0%" "yes" "$([[ $out == *'[----------]   0%'* ]] && print yes)"
 assert_eq "countdown duration ok"  "yes" "$( (( took >= 1 && took <= 4 )) && print yes )"
+assert_eq "countdown on time ok" "0" "$(SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $?)"
+assert_eq "countdown late fails" "1" "$(GRACE=0 TICK=2.5 SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $?)"
 
 # countdown (full-screen mode): enters and leaves the alternate screen, last frame is 100%
 out=$(SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 countdown 1)
@@ -319,6 +321,9 @@ assert_eq "e2e bad argument exit" "1" "$(run banana >/dev/null 2>&1; print $?)"
 assert_eq "e2e bad argument hint" "yes" "$([[ $(run banana 2>&1) == *'sleeptimer -h'* ]] && print yes)"
 assert_eq "e2e too long explains" "yes" "$([[ $(run 25h 2>&1) == *'longer than 24 hours'* ]] && print yes)"
 assert_eq "e2e too long exit 1" "1" "$(run 25h >/dev/null 2>&1; print $?)"
+e2e=$(SLEEPTIMER_TICK=2.5 SLEEPTIMER_GRACE=0 run 1s 2>/dev/null)
+assert_eq "e2e late: explains"     "yes" "$([[ $e2e == *'Time ran out while your Mac was asleep'* ]] && print yes)"
+assert_eq "e2e late: never sleeps" "no"  "$([[ $e2e == *'DRY RUN'* ]] && print yes || print no)"
 
 # end-to-end: help and options
 assert_eq "help -h"      "yes" "$([[ $(run -h) == *'Usage:'*'sleeptimer themes'* ]] && print yes)"
