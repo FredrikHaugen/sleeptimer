@@ -25,13 +25,13 @@ Phase 1: CLI Stabilization (Current) ➡️ Phase 2: Swift Menubar App ➡️ Ph
 
 _Before writing Swift code, ensure the core logic is perfectly bulletproof._
 
-- [ ] **Lock down core features:**
-  - [ ] Media pause command (`osascript -e "tell application \"System Events\" to keystroke (key code 103)"` or target specific apps like Spotify/Music).
-  - [ ] Safe Mac sleep logic (`pmset displaysleepnow` or `osascript -e 'tell application "System Events" to sleep'`).
-  - [ ] Implement the `--yolo` flag (utilize `caffeinate -d` or `caffeinate -i` under the hood to prevent sleep).
-- [ ] **Handle edge cases:**
-  - [ ] Gracefully handle users closing the terminal midway through a countdown.
-  - [ ] Add explicit logic ensuring the `--yolo` flag cleanly terminates when toggled off.
+- [x] **Lock down core features:**
+  - [x] Media pause command (`osascript -e "tell application \"System Events\" to keystroke (key code 103)"` or target specific apps like Spotify/Music).
+  - [x] Safe Mac sleep logic (`pmset displaysleepnow` or `osascript -e 'tell application "System Events" to sleep'`).
+  - [x] Implement the `--yolo` flag (utilize `caffeinate -d` or `caffeinate -i` under the hood to prevent sleep).
+- [x] **Handle edge cases:**
+  - [x] Gracefully handle users closing the terminal midway through a countdown.
+  - [x] Add explicit logic ensuring the `--yolo` flag cleanly terminates when toggled off.
 
 ### 🍏 Phase 2: Build the Swift Menubar App (v0.5.0)
 

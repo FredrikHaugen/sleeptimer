@@ -83,7 +83,7 @@ Tests that call the real `pause_media`/`go_to_sleep`/`ask_media_permission` code
 
 ## Conventions
 
-- `main` handles `-h`/`--help`/`help`, `themes [name]`, `yolo`/`--yolo [off]`, unknown `-*` options (exit 2), a duration argument, or falls back to the prompt. The help text is in `usage()`.
+- `main` handles `-h`/`--help`/`help`, `-v`/`--version` (prints `VERSION`), `themes [name]`, `yolo`/`--yolo [off]`, unknown `-*` options (exit 2), a duration argument, or falls back to the prompt. The help text is in `usage()`.
 - User-facing strings (the prompt, the "Sleeping in …" and "Goes to sleep at …" lines, error hints, `Cancelled — not sleeping.`) are asserted as substrings in the tests and quoted in the README. When you change one, update all three places: the script, the tests and the README.
 - The README is a step-by-step guide for non-technical users. Keep its wording simple, and update it whenever prompts, messages or commands change.
 - Implementation plans live in `docs/superpowers/plans/`. Work happens on `feat/*` branches and lands via a PR to `master`.

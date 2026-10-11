@@ -383,6 +383,9 @@ assert_eq "help -h"      "yes" "$([[ $(run -h) == *'Usage:'*'sleeptimer themes'*
 assert_eq "help --help"  "yes" "$([[ $(run --help) == *'Usage:'* ]] && print yes)"
 assert_eq "help exit 0"  "0"   "$(run -h >/dev/null; print $?)"
 assert_eq "bad option exit 2" "2" "$(run -x >/dev/null 2>&1; print $?)"
+assert_eq "version" "sleeptimer 0.1.0" "$(run --version)"
+assert_eq "version -v" "sleeptimer 0.1.0" "$(run -v)"
+assert_eq "help mentions version" "yes" "$([[ $(run -h) == *'sleeptimer --version'* ]] && print yes)"
 
 # end-to-end: themes command
 assert_eq "themes set"      "yes" "$([[ $(run themes ocean) == 'Theme set to ocean'* ]] && print yes)"

@@ -115,6 +115,8 @@ Goes to sleep at 23:45. Ctrl+C to cancel.
 
 **Help:** `sleeptimer -h` lists everything it can do.
 
+**Version:** `sleeptimer --version`.
+
 **Leave the Terminal window open.** You can minimize it with the yellow button,
 but don't close it, or the timer stops.
 

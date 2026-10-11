@@ -1,5 +1,6 @@
 #!/usr/bin/env zsh
 # sleeptimer — count down with a progress bar, then pause media, mute and put the Mac to sleep.
+VERSION=0.1.0
 
 zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
 zmodload zsh/system    # provides $sysparams (a subshell's own pid and parent pid)
@@ -662,6 +663,7 @@ Usage:
   sleeptimer yolo off        turn sleep back on if it got stuck off
   sleeptimer --yolo          same as sleeptimer yolo
   sleeptimer -h              show this help
+  sleeptimer --version       show the version
 
 Times:
   A number without a unit uses the unit you used last time (minutes at first).
@@ -702,6 +704,7 @@ main() {
     -h|--help|help) usage; return 0 ;;
     themes) shift; themes_cmd "$@"; return ;;
     yolo|--yolo) shift; yolo_cmd "$@"; return ;;
+    -v|--version|version) print -r -- "sleeptimer $VERSION"; return 0 ;;
     -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
   esac
   trap cancel INT TERM QUIT
