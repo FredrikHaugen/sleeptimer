@@ -409,13 +409,23 @@ ask_media_permission() {
   return 0
 }
 
+# go_to_sleep — pause, mute and sleep. Returns 1, with the reason, if the Mac couldn't be muted and
+# put to sleep, or if sleep is turned off system-wide (pmset sleepnow then does nothing).
+# The mute + sleep line must stay exactly as it is.
 go_to_sleep() {
   if [[ -n $SLEEPTIMER_DRY_RUN ]]; then
     print "DRY RUN: pause + mute + sleep"
     return
   fi
   pause_media
-  osascript -e "set volume with output muted" && pmset sleepnow
+  if ! { osascript -e "set volume with output muted" && pmset sleepnow }; then
+    print -u2 "Couldn't mute the sound and put the Mac to sleep."
+    return 1
+  fi
+  if (( $(sleep_disabled) )); then
+    print -u2 "Sleep is turned off system-wide, so your Mac may not have gone to sleep. To fix it: sleeptimer yolo off"
+    return 1
+  fi
 }
 
 cancel() {

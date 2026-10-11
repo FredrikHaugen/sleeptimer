@@ -194,6 +194,8 @@ click the speaker icon at the top of the screen.
 | The timer is in the wrong unit | A plain number uses the unit you used last time. Press **Control + C**, then add the unit, like `45m`. |
 | Colors look strange | Try `sleeptimer themes classic`. |
 | `Heads up: sleep is turned off system-wide` | Something (YOLO, or another keep-awake app) switched sleep off, so the timer may not be able to put the Mac to sleep. Type `sleeptimer yolo off` to switch it back on. |
+| `Sleep is turned off system-wide, so your Mac may not have gone to sleep` | Same cause as above: something switched sleep off while the timer ran. Type `sleeptimer yolo off`. |
+| `Couldn't mute the sound and put the Mac to sleep.` | macOS refused. Put the Mac to sleep from the Apple menu → **Sleep** this time. If it keeps happening, restart the Mac. |
 | The timer stopped by itself | The Terminal window was probably closed. Start it again and leave the window open. |
 | `Tip: brew install media-control ...` when the timer ends | Only Apple Music and Spotify were paused, because Step 4 was skipped. Do **Step 4** to pause YouTube and other players too. |
 | Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. For Apple Music or Spotify, check **System Settings → Privacy & Security → Automation** and allow Terminal to control them. |

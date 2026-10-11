@@ -277,6 +277,30 @@ assert_eq "permission doesn't wait for an answer" "yes" "$( (( EPOCHSECONDS - t0
 sleep 0.5  # let that background fake log its call before the log is cleared below
 : > $FAKE_LOG
 
+# go_to_sleep, the real (non-dry-run) path, with fakes only: path has no real pmset/osascript (see the tripwire)
+gts() { ( path=($fake_bin /bin); unset SLEEPTIMER_DRY_RUN; (( $# )) && export "$@"; go_to_sleep ) }
+: > $FAKE_LOG; rm -f $FAKE_STATE
+gts_out=$(gts 2>&1); gts_rc=$?
+assert_eq "sleep runs mute then sleepnow" \
+  'osascript -e set volume with output muted
+pmset sleepnow' "$(<$FAKE_LOG)"
+assert_eq "sleep ok exit 0" "0" "$gts_rc"
+: > $FAKE_LOG
+gts_out=$(gts STUB_OSASCRIPT_RC=1 2>&1); gts_rc=$?
+assert_eq "mute fails: no sleepnow" "no" "$([[ $(<$FAKE_LOG) == *sleepnow* ]] && print yes || print no)"
+assert_eq "mute fails: exit 1" "1" "$gts_rc"
+assert_eq "mute fails: says so" "yes" \
+  "$([[ $gts_out == *"Couldn't mute the sound and put the Mac to sleep"* ]] && print yes)"
+gts_out=$(gts STUB_SLEEPNOW_RC=1 2>&1); gts_rc=$?
+assert_eq "sleepnow fails: exit 1" "1" "$gts_rc"
+assert_eq "sleepnow fails: says so" "yes" \
+  "$([[ $gts_out == *"Couldn't mute the sound and put the Mac to sleep"* ]] && print yes)"
+gts_out=$(gts STUB_SLEEP_DISABLED=1 2>&1); gts_rc=$?
+assert_eq "sleep blocked: exit 1" "1" "$gts_rc"
+assert_eq "sleep blocked: says how to fix" "yes" \
+  "$([[ $gts_out == *'may not have gone to sleep'*'sleeptimer yolo off'* ]] && print yes)"
+: > $FAKE_LOG; rm -f $FAKE_STATE
+
 # end-to-end: executed script, dry run, compact mode
 run() { PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
 rm -f $SLEEPTIMER_CONFIG
