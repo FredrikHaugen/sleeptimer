@@ -33,7 +33,7 @@ typeset -A GLYPHS=(
   9 '###|# #|###|  #|###'  : ' |#| |#| '
 )
 
-# parse_duration <text> <default-unit> — prints "<seconds> <unit>"; returns 1 on invalid input.
+# parse_duration <text> <default-unit> — prints "<seconds> <unit>"; returns 1 on invalid input, 2 if over 24 hours.
 # Accepts "45", "45m", "1,25h", "1.5 hours", ".5h", "90 sec". Comma or dot, up to 3 decimals.
 parse_duration() {
   local text=${(L)1//[[:space:]]/} unit=$2
@@ -50,7 +50,8 @@ parse_duration() {
   [[ $unit == [smh] ]] || return 1
   local milli=$(( 10#${whole:-0} * 1000 + 10#${(r:3::0:)frac} ))
   local secs=$(( (milli * UNIT_SECS[$unit] + 500) / 1000 ))
-  (( secs >= 1 && secs <= MAX_SECS )) || return 1
+  (( secs >= 1 )) || return 1
+  (( secs <= MAX_SECS )) || return 2
   print "$secs $unit"
 }
 
@@ -207,7 +208,7 @@ load_config() {
     case $key in
       unit)  [[ $value == [smh] ]] && CFG_UNIT=$value ;;
       theme) is_theme $value && CFG_THEME=$value ;;
-      last)  [[ $value == <1-> ]] && (( ${#value} <= 10 )) && CFG_LAST=$value ;;
+      last)  [[ $value == <1-> ]] && (( ${#value} <= 10 && value <= MAX_SECS )) && CFG_LAST=$value ;;
     esac
   done < $CONFIG
   return 0
@@ -226,6 +227,11 @@ duration_prompt() {
   print -rn -- "How long? (${UNIT_NAME[$CFG_UNIT]}s$hint): "
 }
 
+# too_long_msg <unit> — explain the 24-hour limit and which unit a plain number uses.
+too_long_msg() {
+  print -u2 "That's longer than 24 hours, the longest timer. Plain numbers are in ${UNIT_NAME[$1]}s right now; add a unit, like 45m."
+}
+
 # ask_duration — prompt until a valid duration is entered; prints "<seconds> <unit>".
 # A bare number uses the remembered unit; Enter alone repeats the last timer.
 ask_duration() {
@@ -236,8 +242,12 @@ ask_duration() {
       print "$CFG_LAST $CFG_UNIT"
       return 0
     fi
-    parsed=$(parse_duration "$input" $CFG_UNIT) && { print -r -- $parsed; return 0 }
-    print -u2 "Type a number like 45, or add a unit: 90s, 45m, 1,5h."
+    parsed=$(parse_duration "$input" $CFG_UNIT)
+    case $? in
+      0) print -r -- $parsed; return 0 ;;
+      2) too_long_msg $CFG_UNIT ;;
+      *) print -u2 "Type a number like 45, or add a unit: 90s, 45m, 1,5h." ;;
+    esac
   done
 }
 
@@ -263,7 +273,8 @@ screen_leave() { (( IN_TUI )) && printf '\e[?25h\e[?1049l'; IN_TUI=0 }
 draw_screen() {
   local -a size=($(term_size))
   local frame=$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)
-  printf '\e[H%s\e[J' "${frame//$'\n'/$'\e[K\n'}"
+  local nl=$'\e[K\n'  # a $'...' replacement inside "${//}" would stay literal
+  printf '\e[H%s\e[J' "${frame//$'\n'/$nl}"
 }
 
 # countdown <total> — redraw until total seconds of wall-clock time pass.
@@ -366,12 +377,16 @@ main() {
     -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
   esac
   trap cancel INT TERM HUP
-  local parsed secs
+  local parsed secs rc
   if (( $# )); then
-    parsed=$(parse_duration "$*" $CFG_UNIT) || {
+    parsed=$(parse_duration "$*" $CFG_UNIT); rc=$?
+    if (( rc == 2 )); then
+      too_long_msg $CFG_UNIT
+      return 1
+    elif (( rc )); then
       print -u2 "Can't read \"$*\" as a time. Try 45, 90s, 30m or 1,5h (sleeptimer -h for help)."
       return 1
-    }
+    fi
   else
     parsed=$(ask_duration) || { print; return 1 }
   fi

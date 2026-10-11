@@ -48,6 +48,8 @@ assert_fails "parse two dots"       parse_duration 1.2.3 m
 assert_fails "parse 4 decimals"     parse_duration 0,0001h m
 assert_fails "parse bad unit word"  parse_duration 5x m
 assert_fails "parse over 24h"       parse_duration 25h m
+assert_eq "parse too long exit 2" "2" "$(parse_duration 25h m; print $?)"
+assert_eq "parse invalid exit 1"  "1" "$(parse_duration abc m; print $?)"
 assert_fails "parse 7 digits"       parse_duration 1000000 s
 
 # fmt_dec / describe_duration
@@ -101,6 +103,9 @@ assert_eq "config round trip" "h ocean 4500" "$CFG_UNIT $CFG_THEME $CFG_LAST"
 print -l 'unit=zz' 'theme=*' 'last=abc' 'junk line' > $SLEEPTIMER_CONFIG
 load_config
 assert_eq "config ignores bad values" "m night 0" "$CFG_UNIT $CFG_THEME $CFG_LAST"
+print -l 'last=9999999999' > $SLEEPTIMER_CONFIG
+load_config
+assert_eq "config ignores last over 24h" "0" "$CFG_LAST"
 assert_eq "config unwritable ok" "0" "$( CONFIG=/nonexistent/dir/config; save_config; print $? )"
 rm -f $SLEEPTIMER_CONFIG; load_config
 
@@ -114,6 +119,8 @@ CFG_UNIT=h CFG_LAST=4500
 assert_eq "ask Enter repeats"   "4500 h" "$(print '' | ask_duration 2>/dev/null)"
 assert_eq "prompt with last" "How long? (hours; Enter = 1.25 hours): " "$(duration_prompt)"
 assert_fails "ask EOF" ask_duration </dev/null
+assert_eq "ask too long explains" "yes" \
+  "$( [[ $(print -l 45 30m | ask_duration 2>&1 >/dev/null) == *'longer than 24 hours'*'in hours'* ]] && print yes )"
 CFG_UNIT=m CFG_LAST=0
 
 # render_big / big_width
@@ -165,6 +172,12 @@ assert_eq "tui restores terminal" "yes" "$([[ $out == *$'\e[?25h\e[?1049l' ]] &&
 assert_eq "tui final frame 100%"  "yes" "$([[ $out == *'100%  ·  00:00 left'* ]] && print yes)"
 TICK=1
 
+# draw_screen: real erase-line + newline between rows, no literal escape text
+frame=$(SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 draw_screen 10 600 600)
+assert_eq "draw_screen real newlines" "20" "${#${(@f)frame}}"
+assert_eq "draw_screen erases lines" "yes" "$([[ $frame == *$'\e[K\n'* ]] && print yes)"
+assert_eq "draw_screen no literal escapes" "no" "$([[ $frame == *"\$'"* ]] && print yes || print no)"
+
 # term_size: env override
 assert_eq "term_size override" "100 40" "$(SLEEPTIMER_COLS=100 SLEEPTIMER_ROWS=40 term_size)"
 
@@ -198,6 +211,8 @@ e2e=$(run 1s 2>/dev/null </dev/null)
 assert_eq "e2e argument skips prompt" "yes" "$([[ $e2e == *'DRY RUN'* ]] && print yes)"
 assert_eq "e2e bad argument exit" "1" "$(run banana >/dev/null 2>&1; print $?)"
 assert_eq "e2e bad argument hint" "yes" "$([[ $(run banana 2>&1) == *'sleeptimer -h'* ]] && print yes)"
+assert_eq "e2e too long explains" "yes" "$([[ $(run 25h 2>&1) == *'longer than 24 hours'* ]] && print yes)"
+assert_eq "e2e too long exit 1" "1" "$(run 25h >/dev/null 2>&1; print $?)"
 
 # end-to-end: help and options
 assert_eq "help -h"      "yes" "$([[ $(run -h) == *'Usage:'*'sleeptimer themes'* ]] && print yes)"
