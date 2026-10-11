@@ -300,6 +300,21 @@ countdown() {
   fi
 }
 
+# sleep_disabled — prints 1 if sleep is turned off system-wide (pmset disablesleep), else 0.
+sleep_disabled() {
+  local line
+  for line in "${(@f)$(pmset -g 2>/dev/null)}"; do
+    [[ $line =~ '^[[:space:]]*SleepDisabled[[:space:]]+1' ]] && { print 1; return }
+  done
+  print 0
+}
+
+# yolo_guard <pid> <prev> — the root command YOLO runs: turn sleep off, then put <prev> back
+# once <pid> is gone. It polls instead of trapping, so it still restores after kill -9 or a closed window.
+yolo_guard() {
+  print -r -- "trap '' INT HUP TERM; pmset -a disablesleep 1; while kill -0 $1 2>/dev/null; do sleep 1; done; pmset -a disablesleep $2"
+}
+
 # pause_media — pause whatever is "Now Playing" (needs `brew install media-control`).
 # Never fails: a missing tool or nothing playing must not stop the Mac sleeping.
 pause_media() {
@@ -394,6 +409,7 @@ main() {
   save_config
   print -r -- "Sleeping in $(fmt_time $secs) ($(describe_duration $secs))."
   print -r -- "Goes to sleep at $(fmt_clock $(( EPOCHSECONDS + secs ))). Ctrl+C to cancel."
+  (( $(sleep_disabled) )) && print -u2 "Heads up: sleep is turned off system-wide, so your Mac may stay awake when the timer ends. To fix it: sleeptimer yolo off"
   countdown $secs
   go_to_sleep
 }

@@ -24,6 +24,23 @@ assert_fails() {  # assert_fails <name> <cmd...>
   fi
 }
 
+# Fake sudo / pmset / caffeinate, so no test ever changes real power settings.
+# STUB_SLEEP_DISABLED sets what "pmset -g" reports; STUB_SUDO_RC != 0 makes every sudo call fail;
+# every other call is appended to $FAKE_LOG.
+fake_bin=$(mktemp -d)
+export FAKE_LOG=$fake_bin/calls.log STUB_SLEEP_DISABLED=0 STUB_SUDO_RC=0
+print -l '#!/bin/sh' \
+  'if [ "$1" = "-g" ]; then printf "System-wide power settings:\n SleepDisabled\t\t%s\nCurrently in use:\n sleep 1\n" "$STUB_SLEEP_DISABLED"; exit 0; fi' \
+  'echo "pmset $*" >> "$FAKE_LOG"' > $fake_bin/pmset
+print -l '#!/bin/sh' \
+  'echo "sudo $*" >> "$FAKE_LOG"' \
+  '[ "$STUB_SUDO_RC" = 0 ] || exit "$STUB_SUDO_RC"' \
+  '[ "$1" = "-v" ] && exit 0' \
+  '[ "$1" = "-n" ] && shift' \
+  'exec "$@"' > $fake_bin/sudo
+print -l '#!/bin/sh' 'echo "caffeinate $*" >> "$FAKE_LOG"' > $fake_bin/caffeinate
+chmod +x $fake_bin/*
+
 # parse_duration: bare number uses the default unit; inline unit overrides it
 assert_eq "parse bare uses default" "2700 m" "$(parse_duration 45 m)"
 assert_eq "parse bare seconds"      "45 s"   "$(parse_duration 45 s)"
@@ -198,7 +215,7 @@ assert_eq "pause_media missing tool tip" "yes" \
 rm -rf $stub_dir
 
 # end-to-end: executed script, dry run, compact mode
-run() { SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
+run() { PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
 rm -f $SLEEPTIMER_CONFIG
 e2e=$(print 1s | run 2>/dev/null)
 assert_eq "e2e announces"      "yes" "$([[ $e2e == *'Sleeping in 00:01 (1 second = 0.02 minutes).'* ]] && print yes)"
@@ -246,6 +263,21 @@ assert_eq "cancel message"          "yes" "$([[ $out == *'Cancelled — not slee
 assert_eq "cancel never sleeps"     "no"  "$([[ $out == *'DRY RUN'* ]] && print yes || print no)"
 rm -f $log
 
+# sleep_disabled reads pmset -g
+assert_eq "sleep_disabled 0" "0" "$( path=($fake_bin $path); STUB_SLEEP_DISABLED=0; sleep_disabled )"
+assert_eq "sleep_disabled 1" "1" "$( path=($fake_bin $path); export STUB_SLEEP_DISABLED=1; sleep_disabled )"
+assert_eq "sleep_disabled no pmset" "0" "$( path=(/nonexistent); sleep_disabled )"
+
+# yolo_guard: restores the previous value once the pid is gone
+assert_eq "yolo_guard command" \
+  "trap '' INT HUP TERM; pmset -a disablesleep 1; while kill -0 42 2>/dev/null; do sleep 1; done; pmset -a disablesleep 0" \
+  "$(yolo_guard 42 0)"
+
+# normal timer warns when sleep is turned off system-wide
+assert_eq "timer warns if sleep off" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 run 1s 2>&1) == *'Heads up: sleep is turned off'*'sleeptimer yolo off'* ]] && print yes)"
+assert_eq "timer quiet if sleep on"  "no"  "$([[ $(run 1s 2>&1) == *'Heads up'* ]] && print yes || print no)"
+
+rm -rf $fake_bin
 rm -rf ${SLEEPTIMER_CONFIG:h:h}
 print
 (( fails == 0 )) && print "All tests passed" || print "$fails test(s) failed"
