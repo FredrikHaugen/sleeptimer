@@ -213,13 +213,14 @@ render_yolo() {
   local -a info=(
     "YOLO  ·  awake for $clock"
     "${${(M)lid:#1}:+Closing the lid won't put it to sleep}${${lid:#1}:+Closing the lid WILL still put it to sleep}"
+    "Don't put it in a bag: it won't sleep and can get very hot"
     "Ctrl+C to let your Mac sleep again"
-  ) tint=("$C_ACCENT" "" "$C_DIM") lines=()
-  # Biggest clock that fits: 5s rows + 1 gap + 3 info lines.
+  ) tint=("$C_ACCENT" "" "" "$C_DIM") lines=()
+  # Biggest clock that fits: 5s rows + 1 gap + 4 info lines.
   for s in 4 3 2 1; do
-    (( bw * 2 * s <= cols - 4 && 5 * s + 4 <= rows )) && { scale=$s; break }
+    (( bw * 2 * s <= cols - 4 && 5 * s + 5 <= rows )) && { scale=$s; break }
   done
-  local height=$(( scale ? 5 * scale + 4 : 3 ))
+  local height=$(( scale ? 5 * scale + 5 : 4 ))
   repeat $(( (rows - height) / 2 )) lines+=("")
   if (( scale )); then
     local pad=${(l:$(( (cols - bw * 2 * scale) / 2 )):: :)}
@@ -347,10 +348,20 @@ sleep_disabled() {
   print 0
 }
 
+# wait_sleep_disabled — poll up to ~3 s for the guard to switch sleep off; false if it never does.
+wait_sleep_disabled() {
+  repeat 15; do
+    (( $(sleep_disabled) )) && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 # yolo_guard <pid> <prev> — the root command YOLO runs: turn sleep off, then put <prev> back
 # once <pid> is gone. It polls instead of trapping, so it still restores after kill -9 or a closed window.
+# Fixed PATH and detached stdio: root must not run the user's pmset, or die on a closed pipe.
 yolo_guard() {
-  print -r -- "trap '' INT HUP TERM; pmset -a disablesleep 1; while kill -0 $1 2>/dev/null; do sleep 1; done; pmset -a disablesleep $2"
+  print -r -- "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; pmset -a disablesleep 1; while kill -0 $1 2>/dev/null; do sleep 1; done; pmset -a disablesleep $2"
 }
 
 # pause_media — pause whatever is "Now Playing" (needs `brew install media-control`).
@@ -374,6 +385,7 @@ go_to_sleep() {
 }
 
 cancel() {
+  (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
   screen_leave
   print "\nCancelled — not sleeping."
   exit 130
@@ -387,21 +399,28 @@ yolo_cmd() {
     *) print -u2 "Unknown: sleeptimer yolo $1 (try: sleeptimer yolo, or sleeptimer yolo off)"; return 2 ;;
   esac
   local lid=1
-  YOLO_PREV=$(sleep_disabled)
+  YOLO_PREV=$(sleep_disabled) YOLO_START=$EPOCHSECONDS
+  trap yolo_stop INT TERM HUP
   print -r -- "YOLO mode: your Mac stays awake and the screen stays on until you press Ctrl+C."
   print -r -- "Don't put it in a bag while this runs. It won't sleep and can get very hot."
-  if (( ! YOLO_PREV )); then
-    print -r -- "To stay awake with the lid closed, macOS needs your admin password (used only for: pmset disablesleep)."
-    if sudo -v; then
-      nohup sudo -n zsh -c "$(yolo_guard $$ $YOLO_PREV)" >/dev/null 2>&1 &!
-    else
-      lid=0
-      print -u2 "No admin rights, so closing the lid will still put the Mac to sleep."
+  if [[ -n $SLEEPTIMER_DRY_RUN ]]; then
+    print "DRY RUN: not running caffeinate or sudo pmset disablesleep"
+  else
+    if (( ! YOLO_PREV )); then
+      print -r -- "To stay awake with the lid closed, macOS needs your admin password (used only for: pmset disablesleep)."
+      if sudo -v; then
+        nohup sudo -n /bin/zsh -f -c "$(yolo_guard $$ $YOLO_PREV)" >/dev/null 2>&1 &!
+        if ! wait_sleep_disabled; then
+          lid=0
+          print -u2 "Couldn't block lid-close sleep, so closing the lid will still put the Mac to sleep."
+        fi
+      else
+        lid=0
+        print -u2 "No admin rights, so closing the lid will still put the Mac to sleep."
+      fi
     fi
+    caffeinate -dims -w $$ >/dev/null 2>&1 &!
   fi
-  caffeinate -dims -w $$ >/dev/null 2>&1 &!
-  YOLO_START=$EPOCHSECONDS
-  trap yolo_stop INT TERM HUP
   use_tui && screen_enter
   local -a size
   while true; do
@@ -417,6 +436,7 @@ yolo_cmd() {
 
 # yolo_stop — leave YOLO mode; the root guard and caffeinate notice the exit and undo themselves.
 yolo_stop() {
+  (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
   screen_leave
   print -r -- $'\n'"YOLO off after $(fmt_time $(( EPOCHSECONDS - YOLO_START )))."
   if (( YOLO_PREV )); then
@@ -431,6 +451,10 @@ yolo_stop() {
 yolo_off() {
   if (( ! $(sleep_disabled) )); then
     print "Sleep is already on. Nothing to do."
+    return 0
+  fi
+  if [[ -n $SLEEPTIMER_DRY_RUN ]]; then
+    print "DRY RUN: not running sudo pmset -a disablesleep 0"
     return 0
   fi
   print -r -- "Turning sleep back on needs your admin password (runs: pmset -a disablesleep 0)."
@@ -509,7 +533,10 @@ main() {
   save_config
   print -r -- "Sleeping in $(fmt_time $secs) ($(describe_duration $secs))."
   print -r -- "Goes to sleep at $(fmt_clock $(( EPOCHSECONDS + secs ))). Ctrl+C to cancel."
-  (( $(sleep_disabled) )) && print -u2 "Heads up: sleep is turned off system-wide, so your Mac may stay awake when the timer ends. To fix it: sleeptimer yolo off"
+  if (( $(sleep_disabled) )); then
+    print -u2 "Heads up: sleep is turned off system-wide, so your Mac may stay awake when the timer ends. To fix it: sleeptimer yolo off"
+    use_tui && sleep 3  # give the warning time to be read before full screen covers it
+  fi
   countdown $secs
   go_to_sleep
 }
