@@ -24,22 +24,6 @@ assert_fails() {  # assert_fails <name> <cmd...>
   fi
 }
 
-# to_seconds
-assert_eq "to_seconds s"        "45"    "$(to_seconds s 45)"
-assert_eq "to_seconds m"        "2700"  "$(to_seconds m 45)"
-assert_eq "to_seconds h"        "7200"  "$(to_seconds h 2)"
-assert_eq "to_seconds upper M"  "60"    "$(to_seconds M 1)"
-assert_eq "to_seconds word"     "180"   "$(to_seconds minutes 3)"
-assert_fails "to_seconds zero"      to_seconds m 0
-assert_fails "to_seconds negative"  to_seconds m -5
-assert_fails "to_seconds decimal"   to_seconds m 1.5
-assert_fails "to_seconds letters"   to_seconds m abc
-assert_fails "to_seconds empty"     to_seconds m ""
-assert_fails "to_seconds bad unit"  to_seconds x 5
-assert_fails "to_seconds overflow" to_seconds h 99999999999999999999999
-assert_fails "to_seconds 7 digits" to_seconds s 1000000
-assert_eq "to_seconds 6 digits" "999999" "$(to_seconds s 999999)"
-
 # parse_duration: bare number uses the default unit; inline unit overrides it
 assert_eq "parse bare uses default" "2700 m" "$(parse_duration 45 m)"
 assert_eq "parse bare seconds"      "45 s"   "$(parse_duration 45 s)"
@@ -120,12 +104,17 @@ assert_eq "config ignores bad values" "m night 0" "$CFG_UNIT $CFG_THEME $CFG_LAS
 assert_eq "config unwritable ok" "0" "$( CONFIG=/nonexistent/dir/config; save_config; print $? )"
 rm -f $SLEEPTIMER_CONFIG; load_config
 
-# ask_duration: re-prompts on bad unit and bad amount; accepts word units
-assert_eq "ask_duration retries" "180" \
-  "$(print -l x Minutes abc 0 3 | ask_duration 2>/dev/null)"
-assert_eq "ask_duration hours"   "7200" \
-  "$(print -l h 2 | ask_duration 2>/dev/null)"
-assert_fails "ask_duration EOF" ask_duration </dev/null
+# ask_duration: bare number uses remembered unit, inline unit wins, Enter repeats last
+CFG_UNIT=m CFG_LAST=0
+assert_eq "prompt first run" "How long? (minutes): " "$(duration_prompt)"
+assert_eq "ask bare number"     "2700 m" "$(print 45 | ask_duration 2>/dev/null)"
+assert_eq "ask inline unit"     "4500 h" "$(print 1,25h | ask_duration 2>/dev/null)"
+assert_eq "ask retries"         "90 s"   "$(print -l abc 0 '' 90s | ask_duration 2>/dev/null)"
+CFG_UNIT=h CFG_LAST=4500
+assert_eq "ask Enter repeats"   "4500 h" "$(print '' | ask_duration 2>/dev/null)"
+assert_eq "prompt with last" "How long? (hours; Enter = 1.25 hours): " "$(duration_prompt)"
+assert_fails "ask EOF" ask_duration </dev/null
+CFG_UNIT=m CFG_LAST=0
 
 # countdown: wall-clock based, so a 0.3s tick still finishes ~on time and ends at 100%
 TICK=0.3
@@ -153,10 +142,38 @@ assert_eq "pause_media missing tool tip" "yes" \
   "$( path=(/nonexistent); [[ $(pause_media 2>&1) == *'brew install media-control'* ]] && print yes )"
 rm -rf $stub_dir
 
-# end-to-end: executed script with piped input, dry run
-e2e=$(print -l s 1 | SLEEPTIMER_DRY_RUN=1 zsh $SCRIPT 2>/dev/null)
-assert_eq "e2e announces" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
-assert_eq "e2e dry-runs"  "yes" "$([[ $e2e == *'DRY RUN: pause + mute + sleep'* ]] && print yes)"
+# end-to-end: executed script, dry run, compact mode
+run() { SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
+rm -f $SLEEPTIMER_CONFIG
+e2e=$(print 1s | run 2>/dev/null)
+assert_eq "e2e announces"      "yes" "$([[ $e2e == *'Sleeping in 00:01 (1 second = 0.02 minutes).'* ]] && print yes)"
+assert_eq "e2e shows sleep at" "yes" "$([[ $e2e == *'Goes to sleep at '[0-9][0-9]:[0-9][0-9]* ]] && print yes)"
+assert_eq "e2e dry-runs"       "yes" "$([[ $e2e == *'DRY RUN: pause + mute + sleep'* ]] && print yes)"
+assert_eq "e2e remembers unit" "yes" "$( grep -qx 'unit=s' $SLEEPTIMER_CONFIG && grep -qx 'last=1' $SLEEPTIMER_CONFIG && print yes )"
+e2e=$(print 1 | run 2>/dev/null)
+assert_eq "e2e bare number uses remembered unit" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
+e2e=$(run 1s 2>/dev/null </dev/null)
+assert_eq "e2e argument skips prompt" "yes" "$([[ $e2e == *'DRY RUN'* ]] && print yes)"
+assert_eq "e2e bad argument exit" "1" "$(run banana >/dev/null 2>&1; print $?)"
+assert_eq "e2e bad argument hint" "yes" "$([[ $(run banana 2>&1) == *'sleeptimer -h'* ]] && print yes)"
+
+# end-to-end: help and options
+assert_eq "help -h"      "yes" "$([[ $(run -h) == *'Usage:'*'sleeptimer themes'* ]] && print yes)"
+assert_eq "help --help"  "yes" "$([[ $(run --help) == *'Usage:'* ]] && print yes)"
+assert_eq "help exit 0"  "0"   "$(run -h >/dev/null; print $?)"
+assert_eq "bad option exit 2" "2" "$(run -x >/dev/null 2>&1; print $?)"
+
+# end-to-end: themes command
+assert_eq "themes set"      "yes" "$([[ $(run themes ocean) == 'Theme set to ocean'* ]] && print yes)"
+assert_eq "themes saved"    "yes" "$( grep -qx 'theme=ocean' $SLEEPTIMER_CONFIG && print yes )"
+listing=$(print '' | run themes)
+assert_eq "themes lists all" "yes" \
+  "$( for t in $THEME_NAMES; do [[ $listing == *") $t "* ]] || exit; done; print yes )"
+assert_eq "themes marks current" "yes" "$([[ $listing == *'* 3) ocean'* ]] && print yes)"
+print 2 | run themes >/dev/null
+assert_eq "themes pick by number" "yes" "$( grep -qx 'theme=classic' $SLEEPTIMER_CONFIG && print yes )"
+assert_eq "themes unknown exit 1" "1" "$(run themes nope >/dev/null 2>&1; print $?)"
+assert_eq "themes keeps unit" "yes" "$( grep -qx 'unit=s' $SLEEPTIMER_CONFIG && print yes )"
 
 rm -rf ${SLEEPTIMER_CONFIG:h:h}
 print

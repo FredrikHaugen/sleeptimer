@@ -25,18 +25,6 @@ typeset -A THEMES=(
 )
 DEFAULT_THEME=night
 
-# to_seconds <unit> <amount> — prints seconds; returns 1 on invalid input.
-to_seconds() {
-  local unit=${${(L)1}[1]} amount=$2
-  [[ $amount == <1-> ]] && (( ${#amount} <= 6 )) || return 1
-  case $unit in
-    s) print $amount ;;
-    m) print $(( amount * 60 )) ;;
-    h) print $(( amount * 3600 )) ;;
-    *) return 1 ;;
-  esac
-}
-
 # parse_duration <text> <default-unit> — prints "<seconds> <unit>"; returns 1 on invalid input.
 # Accepts "45", "45m", "1,25h", "1.5 hours", ".5h", "90 sec". Comma or dot, up to 3 decimals.
 parse_duration() {
@@ -161,26 +149,26 @@ save_config() {
   return 0
 }
 
-# ask_duration — prompt for unit then amount; prints total seconds.
+# duration_prompt — e.g. "How long? (minutes; Enter = 45 minutes): "
+duration_prompt() {
+  local hint=
+  (( CFG_LAST )) && hint="; Enter = $(plural $(fmt_dec $CFG_LAST $UNIT_SECS[$CFG_UNIT]) $UNIT_NAME[$CFG_UNIT])"
+  print -rn -- "How long? (${UNIT_NAME[$CFG_UNIT]}s$hint): "
+}
+
+# ask_duration — prompt until a valid duration is entered; prints "<seconds> <unit>".
+# A bare number uses the remembered unit; Enter alone repeats the last timer.
 ask_duration() {
-  local unit amount secs label
+  local input parsed
   while true; do
-    read "unit?Unit? [s/m/h]: " || return 1
-    unit=${${(L)unit}[1]}
-    case $unit in
-      s) label=seconds ;;
-      m) label=minutes ;;
-      h) label=hours ;;
-      *) print -u2 "Please enter s, m or h."; continue ;;
-    esac
-    break
+    read "input?$(duration_prompt)" || return 1
+    if [[ -z ${input//[[:space:]]/} ]] && (( CFG_LAST )); then
+      print "$CFG_LAST $CFG_UNIT"
+      return 0
+    fi
+    parsed=$(parse_duration "$input" $CFG_UNIT) && { print -r -- $parsed; return 0 }
+    print -u2 "Type a number like 45, or add a unit: 90s, 45m, 1,5h."
   done
-  while true; do
-    read "amount?How many $label? " || return 1
-    secs=$(to_seconds $unit $amount) && break
-    print -u2 "Please enter a whole number greater than 0."
-  done
-  print $secs
 }
 
 # countdown <total> — redraw the bar until total seconds of wall-clock time pass.
@@ -214,12 +202,75 @@ go_to_sleep() {
   osascript -e "set volume with output muted" && pmset sleepnow
 }
 
+cancel() {
+  print "\nCancelled — not sleeping."
+  exit 130
+}
+
+usage() {
+  print -r -- "sleeptimer — count down, then pause media, mute and put the Mac to sleep.
+
+Usage:
+  sleeptimer                 ask how long
+  sleeptimer <time>          start right away: 45, 90s, 30m, 1,5h, 2 hours
+  sleeptimer themes          list the themes and pick one
+  sleeptimer themes <name>   switch theme: ${(j:, :)THEME_NAMES}
+  sleeptimer -h              show this help
+
+Times:
+  A number without a unit uses the unit you used last time (minutes at first).
+  Decimals work with a comma or a dot: 1,25h is 75 minutes.
+  At the prompt, press Enter to repeat your last timer.
+
+Ctrl+C cancels: nothing is paused, muted or put to sleep.
+Settings are saved in ${CONFIG/#$HOME/~}."
+}
+
+# themes_cmd [name] — switch to <name>, or list the themes with a preview and ask which one.
+themes_cmd() {
+  local name=$1 n i mark choice
+  if [[ -n $name ]]; then
+    is_theme $name || { print -u2 "Unknown theme: $name (choose from: ${(j:, :)THEME_NAMES})"; return 1 }
+    CFG_THEME=$name
+    save_config
+    apply_theme $name
+    print -r -- "Theme set to $name  $(bar_cells 10 10)"
+    return 0
+  fi
+  for i in {1..$#THEME_NAMES}; do
+    n=$THEME_NAMES[i]
+    [[ $n == $CFG_THEME ]] && mark='*' || mark=' '
+    printf '%s %d) %-8s %s  %s\n' $mark $i $n \
+      "$(apply_theme $n; bar_cells 12 12)" "${THEMES[$n]##*|}"
+  done
+  read "choice?Pick a theme (number or name; Enter = keep $CFG_THEME): " || return 0
+  [[ -z $choice ]] && return 0
+  [[ $choice == <1-> ]] && (( choice <= $#THEME_NAMES )) && choice=$THEME_NAMES[choice]
+  themes_cmd $choice
+}
+
 main() {
-  apply_theme $DEFAULT_THEME
-  trap 'print "\nCancelled — not sleeping."; exit 130' INT
-  local secs
-  secs=$(ask_duration) || { print; exit 1 }
-  print "Sleeping in $(fmt_time $secs). Ctrl+C to cancel."
+  load_config
+  apply_theme $CFG_THEME
+  case $1 in
+    -h|--help|help) usage; return 0 ;;
+    themes) shift; themes_cmd "$@"; return ;;
+    -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
+  esac
+  trap cancel INT TERM HUP
+  local parsed secs
+  if (( $# )); then
+    parsed=$(parse_duration "$*" $CFG_UNIT) || {
+      print -u2 "Can't read \"$*\" as a time. Try 45, 90s, 30m or 1,5h (sleeptimer -h for help)."
+      return 1
+    }
+  else
+    parsed=$(ask_duration) || { print; return 1 }
+  fi
+  secs=${parsed% *} CFG_UNIT=${parsed#* } CFG_LAST=${parsed% *}
+  save_config
+  print -r -- "Sleeping in $(fmt_time $secs) ($(describe_duration $secs))."
+  print -r -- "Goes to sleep at $(fmt_clock $(( EPOCHSECONDS + secs ))). Ctrl+C to cancel."
   countdown $secs
   go_to_sleep
 }
