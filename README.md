@@ -145,6 +145,30 @@ You can also switch directly: `sleeptimer themes ocean`.
 
 ---
 
+## YOLO mode: keep the Mac awake instead
+
+Want the opposite? **`sleeptimer yolo`** keeps your Mac awake with the screen
+on until you press **Control + C**, even when you close the lid.
+
+```
+sleeptimer yolo
+```
+
+- It asks for your **Mac password** once. macOS needs it to stop the Mac from
+  sleeping when the lid is closed. If you skip it, the Mac still stays awake
+  while the lid is open.
+- With the lid closed, the laptop's own screen turns off (that's how the
+  hardware works), but the Mac keeps running and an external screen stays on.
+- **Don't put the Mac in a bag while YOLO is on.** It won't sleep and can get
+  very hot.
+- Press **Control + C** (or close the Terminal window) and everything goes back
+  to normal within a second or two.
+
+If your Mac ever refuses to sleep afterwards (for example, it restarted while
+YOLO was on), type **`sleeptimer yolo off`**.
+
+---
+
 ## When you wake the Mac up
 
 **Your music or video is paused.** Press play when you want it again.
@@ -164,6 +188,7 @@ click the speaker icon at the top of the screen.
 | It keeps asking **How long?** again | It didn't understand your answer. Type a number like `45`, or a number with a unit like `90s`, `45m` or `1,5h`. The longest timer is 24 hours. |
 | The timer is in the wrong unit | A plain number uses the unit you used last time. Press **Control + C**, then add the unit, like `45m`. |
 | Colors look strange | Try `sleeptimer themes classic`. |
+| `Heads up: sleep is turned off system-wide` | Something (YOLO, or another keep-awake app) switched sleep off, so the timer may not be able to put the Mac to sleep. Type `sleeptimer yolo off` to switch it back on. |
 | The timer stopped by itself | The Terminal window was probably closed. Start it again and leave the window open. |
 | `Tip: brew install media-control ...` when the timer ends | Nothing was paused because Step 4 was skipped. Do **Step 4** if you want pausing. |
 | Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. |

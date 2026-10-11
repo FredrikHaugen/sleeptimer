@@ -30,6 +30,12 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
   - **Full screen** is used when stdout is a TTY. It uses the alternate screen, big digits, and a bar filling all remaining rows. `render_screen` must return exactly `rows` lines, none wider than `cols`; a wrapped line scrolls and garbles the redraw.
   - **One-line `render_bar`** is used otherwise.
   - `cancel` (trapped on INT/TERM/HUP) must call `screen_leave` before exiting 130.
+- **YOLO mode** (`sleeptimer yolo`) is the opposite of the timer. `caffeinate -dims -w $$` blocks normal sleep. Lid-close sleep needs root: a `nohup sudo -n /bin/zsh -f -c "$(yolo_guard …)"` guard sets `pmset -a disablesleep 1` and polls the script's pid, then writes back the *previous* `SleepDisabled` value (`sleep_disabled`).
+  - Never replace the polling with a trap: it must survive `kill -9` and closed windows.
+  - The root shell runs with `-f` (no user startup files), a fixed `PATH` and detached stdio. Keep it that way, because macOS sudo keeps the user's `HOME` and `PATH`.
+  - `wait_sleep_disabled` checks that the guard really took effect before the screen claims the lid is protected.
+  - `SLEEPTIMER_DRY_RUN` also skips `sudo`/`caffeinate` in `yolo` and `yolo off`.
+  - Tests use fake `sudo`/`pmset`/`caffeinate` in `$fake_bin` (log: `$FAKE_LOG`; the fake `pmset` remembers its state in `$FAKE_STATE`) and must never call the real ones. Any test that runs the script must put `$fake_bin` first on `PATH`, because the timer reads `pmset -g` too.
 
 ## Test hooks (environment variables)
 
@@ -44,7 +50,14 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 
 Tests call `apply_theme classic` so expected strings are plain `#`/`-` with no escape codes.
 
+Fake-command env for YOLO tests:
+- `STUB_SLEEP_DISABLED`: what `pmset -g` reports until a `disablesleep` call is recorded.
+- `STUB_SUDO_RC`: non-zero makes every fake `sudo` fail.
+- `STUB_SUDO_N_RC`: non-zero fails only the background `sudo -n` guard.
+
 ## zsh gotchas that have bitten this code
+
+- Signal traps are inherited by `$(…)` subshells, and a rare race lets both the main shell and a helper subshell run the handler, which deadlocks. `cancel` and `yolo_stop` therefore start with `(( ZSH_SUBSHELL )) && exit 1`. Keep that in any new trap handler.
 
 - In `"${var//pat/$'…'}"`, a `$'…'` *replacement* stays literal inside double quotes. Put the replacement in a variable first; `draw_screen` does this.
 - Pad with a variable string using the `p` flag: `${(pl:N::$FILL:)}`.
