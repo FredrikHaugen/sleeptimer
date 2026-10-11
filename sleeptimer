@@ -1,21 +1,82 @@
 #!/usr/bin/env zsh
 # sleeptimer — count down with a progress bar, then pause media, mute and put the Mac to sleep.
 
-zmodload zsh/datetime  # provides $EPOCHSECONDS
+zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
+
+# Bar and digit characters are multibyte; count widths in characters, not bytes.
+[[ ${LC_ALL:-${LC_CTYPE:-$LANG}} == *[Uu][Tt][Ff](-|)8* ]] || LC_ALL=en_US.UTF-8
 
 BAR_WIDTH=${SLEEPTIMER_BAR_WIDTH:-30}
 TICK=${SLEEPTIMER_TICK:-1}
+MAX_SECS=86400  # 24 hours: guards against "45" meaning 45 hours when the remembered unit is h
+CONFIG=${SLEEPTIMER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleeptimer/config}
 
-# to_seconds <unit> <amount> — prints seconds; returns 1 on invalid input.
-to_seconds() {
-  local unit=${${(L)1}[1]} amount=$2
-  [[ $amount == <1-> ]] && (( ${#amount} <= 6 )) || return 1
-  case $unit in
-    s) print $amount ;;
-    m) print $(( amount * 60 )) ;;
-    h) print $(( amount * 3600 )) ;;
+typeset -A UNIT_SECS=(s 1 m 60 h 3600)
+typeset -A UNIT_NAME=(s second m minute h hour)
+
+# Themes: name → "fill|empty|fill color|empty color|accent color|description" (256-color codes).
+THEME_NAMES=(night classic ocean forest sunset)
+typeset -A THEMES=(
+  night   '█|░|63|236|147|Deep blue and lavender'
+  classic '#|-||||Plain ASCII, no colors'
+  ocean   '█|░|39|24|117|Bright blue on navy'
+  forest  '▓|░|34|22|120|Greens'
+  sunset  '█|▒|208|52|214|Orange and red'
+)
+DEFAULT_THEME=night
+
+# Big-digit font: 5 rows per glyph, "#" = lit cell.
+typeset -A GLYPHS=(
+  0 '###|# #|# #|# #|###'  1 '  #|  #|  #|  #|  #'  2 '###|  #|###|#  |###'
+  3 '###|  #|###|  #|###'  4 '# #|# #|###|  #|  #'  5 '###|#  |###|  #|###'
+  6 '###|#  |###|# #|###'  7 '###|  #|  #|  #|  #'  8 '###|# #|###|# #|###'
+  9 '###|# #|###|  #|###'  : ' |#| |#| '
+)
+
+# parse_duration <text> <default-unit> — prints "<seconds> <unit>"; returns 1 on invalid input, 2 if over 24 hours.
+# Accepts "45", "45m", "1,25h", "1.5 hours", ".5h", "90 sec". Comma or dot, up to 3 decimals.
+parse_duration() {
+  local text=${(L)1//[[:space:]]/} unit=$2
+  [[ $text =~ '^([0-9]{0,6})([.,]([0-9]{1,3}))?([a-z]*)$' ]] || return 1
+  local whole=$match[1] frac=$match[3] word=$match[4]
+  [[ -n $whole$frac ]] || return 1
+  case $word in
+    '') ;;
+    s|sec|secs|second|seconds) unit=s ;;
+    m|min|mins|minute|minutes) unit=m ;;
+    h|hr|hrs|hour|hours) unit=h ;;
     *) return 1 ;;
   esac
+  [[ $unit == [smh] ]] || return 1
+  local milli=$(( 10#${whole:-0} * 1000 + 10#${(r:3::0:)frac} ))
+  local secs=$(( (milli * UNIT_SECS[$unit] + 500) / 1000 ))
+  (( secs >= 1 )) || return 1
+  (( secs <= MAX_SECS )) || return 2
+  print "$secs $unit"
+}
+
+# fmt_dec <num> <den> — num/den rounded to 2 decimals, trailing zeros dropped: 4500 3600 → 1.25
+fmt_dec() {
+  local v=$(( ($1 * 200 + $2) / ($2 * 2) )) out
+  out=$(( v / 100 )).${(l:2::0:)$(( v % 100 ))}
+  out=${out%0}; out=${out%0}; out=${out%.}
+  print -r -- $out
+}
+
+# plural <value> <word> — "1 hour", "1.25 hours"
+plural() {
+  [[ $1 == 1 ]] && print -r -- "$1 $2" || print -r -- "$1 ${2}s"
+}
+
+# describe_duration <seconds> — "3600 seconds = 60 minutes = 1 hour"; units that round to 0 are left out.
+describe_duration() {
+  local u v
+  local -a parts
+  for u in s m h; do
+    v=$(fmt_dec $1 $UNIT_SECS[$u])
+    [[ $v == 0 ]] || parts+=("$(plural $v $UNIT_NAME[$u])")
+  done
+  print -r -- ${(j: = :)parts}
 }
 
 # fmt_time <seconds> — MM:SS, or H:MM:SS for an hour or more.
@@ -28,47 +89,215 @@ fmt_time() {
   fi
 }
 
-# render_bar <elapsed> <total> — e.g. "[#####-----]  50%  00:30 left"
+# fmt_clock <epoch> [now] — "23:45" if today, "01:15 tomorrow", otherwise "Sat 14:00".
+fmt_clock() {
+  local t=$1 now=${2:-$EPOCHSECONDS} day today tomorrow hm
+  strftime -s day '%F' $t
+  strftime -s today '%F' $now
+  strftime -s tomorrow '%F' $(( now + 86400 ))
+  strftime -s hm '%H:%M' $t
+  if [[ $day == $today ]]; then
+    print -r -- $hm
+  elif [[ $day == $tomorrow ]]; then
+    print -r -- "$hm tomorrow"
+  else
+    strftime '%a %H:%M' $t
+  fi
+}
+
+# is_theme <name> — true if <name> is a known theme.
+is_theme() {
+  (( ${THEME_NAMES[(Ie)$1]} ))
+}
+
+# apply_theme <name> — sets THEME, FILL, EMPTY and the C_* color escapes; returns 1 for an unknown theme.
+apply_theme() {
+  is_theme $1 || return 1
+  local -a t=("${(@s:|:)THEMES[$1]}")
+  THEME=$1 FILL=$t[1] EMPTY=$t[2]
+  if [[ -n $NO_COLOR || -z $t[3] ]]; then
+    C_FILL= C_EMPTY= C_ACCENT= C_DIM= C_RESET=
+  else
+    C_FILL=$'\e[38;5;'$t[3]m C_EMPTY=$'\e[38;5;'$t[4]m C_ACCENT=$'\e[38;5;'$t[5]m
+    C_DIM=$'\e[2m' C_RESET=$'\e[0m'
+  fi
+}
+
+# bar_cells <filled> <empty> — a colored run of FILL then EMPTY characters.
+bar_cells() {
+  print -rn -- "$C_FILL${(pl:$1::$FILL:)}$C_EMPTY${(pl:$2::$EMPTY:)}$C_RESET"
+}
+
+# render_bar <elapsed> <total> [width] — e.g. "[#####-----]  50%  00:30 left"
 render_bar() {
-  local elapsed=$1 total=$2
+  local elapsed=$1 total=$2 width=${3:-$BAR_WIDTH}
   (( elapsed > total )) && elapsed=$total
   local pct=$(( elapsed * 100 / total ))
-  local filled=$(( elapsed * BAR_WIDTH / total ))
-  local bar="${(l:filled::#:)}${(l:$(( BAR_WIDTH - filled ))::-:)}"
-  printf '[%s] %3d%%  %s left' "$bar" $pct "$(fmt_time $(( total - elapsed )))"
+  local filled=$(( elapsed * width / total ))
+  printf '[%s] %3d%%  %s left' "$(bar_cells $filled $(( width - filled )))" $pct "$(fmt_time $(( total - elapsed )))"
 }
 
-# ask_duration — prompt for unit then amount; prints total seconds.
-ask_duration() {
-  local unit amount secs label
-  while true; do
-    read "unit?Unit? [s/m/h]: " || return 1
-    unit=${${(L)unit}[1]}
-    case $unit in
-      s) label=seconds ;;
-      m) label=minutes ;;
-      h) label=hours ;;
-      *) print -u2 "Please enter s, m or h."; continue ;;
+# big_width <text> — width in cells of <text> drawn with GLYPHS (one blank cell between glyphs).
+big_width() {
+  local c w=-1
+  for c in ${(s::)1}; do (( w += ${#${GLYPHS[$c]%%|*}} + 1 )); done
+  print $w
+}
+
+# render_big <text> <scale> — <text> in big digits: 5*scale lines, each cell 2*scale columns wide.
+render_big() {
+  local text=$1 scale=$2 r c line
+  local on=${(pl:$(( 2 * scale ))::$FILL:)} off=${(l:$(( 2 * scale )):: :)}
+  local -a glyph
+  for r in {1..5}; do
+    line=
+    for c in ${(s::)text}; do
+      glyph=("${(@s:|:)GLYPHS[$c]}")
+      line+="$glyph[r] "
+    done
+    line=${${line% }// /$off}
+    line=${line//\#/$on}
+    repeat $scale print -r -- "$line"
+  done
+}
+
+# render_screen <elapsed> <total> <cols> <rows> <end-epoch> <now> — one full-screen frame.
+# Exactly <rows> lines, none wider than <cols>. Below 30x8 it falls back to one short line.
+render_screen() {
+  local elapsed=$1 total=$2 cols=$3 rows=$4 end=$5 now=$6
+  (( elapsed > total )) && elapsed=$total
+  local left=$(( total - elapsed )) pct=$(( elapsed * 100 / total ))
+  local clock=$(fmt_time $left)
+  if (( cols < 30 || rows < 8 )); then
+    local short="$pct%  $clock left"
+    print -rn -- ${short[1,cols]}
+    return
+  fi
+  local inner=$(( cols - 4 )) bw=$(big_width $clock) scale=0 s line i
+  local -a info=(
+    "$pct%  ·  $clock left  ·  sleeps at $(fmt_clock $end $now)"
+    "$(describe_duration $total)"
+    "Ctrl+C to cancel"
+  ) tint=("$C_ACCENT" "" "$C_DIM") lines=("")
+  # Biggest clock that fits across and leaves at least 2 bar rows: 1 top + 5s + 1 gap + bar + 1 gap + 3 info.
+  for s in 3 2 1; do
+    (( bw * 2 * s <= inner && rows - 5 * s - 6 >= 2 )) && { scale=$s; break }
+  done
+  if (( scale )); then
+    local pad=${(l:$(( (cols - bw * 2 * scale) / 2 )):: :)}
+    for line in "${(@f)$(render_big $clock $scale)}"; do lines+=("$pad$C_ACCENT$line$C_RESET"); done
+    lines+=("")
+  fi
+  local filled=$(( elapsed * inner / total ))
+  local bar="  $(bar_cells $filled $(( inner - filled )))"
+  repeat $(( rows - $#lines - 4 )) lines+=("$bar")
+  lines+=("")
+  for i in {1..$#info}; do
+    line=${info[i][1,cols]}
+    lines+=("${(l:$(( (cols - $#line) / 2 )):: :)}$tint[i]$line${tint[i]:+$C_RESET}")
+  done
+  print -rn -- "${(pj:\n:)lines}"
+}
+
+# load_config — read unit/theme/last from $CONFIG into CFG_*; missing or bad values keep the defaults.
+load_config() {
+  CFG_UNIT=m CFG_THEME=$DEFAULT_THEME CFG_LAST=0
+  [[ -r $CONFIG ]] || return 0
+  local key value
+  while IFS='=' read -r key value; do
+    case $key in
+      unit)  [[ $value == [smh] ]] && CFG_UNIT=$value ;;
+      theme) is_theme $value && CFG_THEME=$value ;;
+      last)  [[ $value == <1-> ]] && (( ${#value} <= 10 && value <= MAX_SECS )) && CFG_LAST=$value ;;
     esac
-    break
-  done
-  while true; do
-    read "amount?How many $label? " || return 1
-    secs=$(to_seconds $unit $amount) && break
-    print -u2 "Please enter a whole number greater than 0."
-  done
-  print $secs
+  done < $CONFIG
+  return 0
 }
 
-# countdown <total> — redraw the bar until total seconds of wall-clock time pass.
+# save_config — write CFG_* to $CONFIG. Never fails: an unwritable config must not stop the timer.
+save_config() {
+  { mkdir -p ${CONFIG:h} && print -l "unit=$CFG_UNIT" "theme=$CFG_THEME" "last=$CFG_LAST" > $CONFIG } 2>/dev/null
+  return 0
+}
+
+# duration_prompt — e.g. "How long? (minutes; Enter = 45 minutes): "
+duration_prompt() {
+  local hint=
+  (( CFG_LAST )) && hint="; Enter = $(plural $(fmt_dec $CFG_LAST $UNIT_SECS[$CFG_UNIT]) $UNIT_NAME[$CFG_UNIT])"
+  print -rn -- "How long? (${UNIT_NAME[$CFG_UNIT]}s$hint): "
+}
+
+# too_long_msg <unit> — explain the 24-hour limit and which unit a plain number uses.
+too_long_msg() {
+  print -u2 "That's longer than 24 hours, the longest timer. Plain numbers are in ${UNIT_NAME[$1]}s right now; add a unit, like 45m."
+}
+
+# ask_duration — prompt until a valid duration is entered; prints "<seconds> <unit>".
+# A bare number uses the remembered unit; Enter alone repeats the last timer.
+ask_duration() {
+  local input parsed
+  while true; do
+    read "input?$(duration_prompt)" || return 1
+    if [[ -z ${input//[[:space:]]/} ]] && (( CFG_LAST )); then
+      print "$CFG_LAST $CFG_UNIT"
+      return 0
+    fi
+    parsed=$(parse_duration "$input" $CFG_UNIT)
+    case $? in
+      0) print -r -- $parsed; return 0 ;;
+      2) too_long_msg $CFG_UNIT ;;
+      *) print -u2 "Type a number like 45, or add a unit: 90s, 45m, 1,5h." ;;
+    esac
+  done
+}
+
+# use_tui — full-screen mode when stdout is a terminal; SLEEPTIMER_TUI=1 or 0 forces it on or off.
+use_tui() {
+  [[ -n $SLEEPTIMER_TUI ]] && { [[ $SLEEPTIMER_TUI == 1 ]]; return }
+  [[ -t 1 ]]
+}
+
+# term_size — prints "<cols> <rows>"; SLEEPTIMER_COLS/SLEEPTIMER_ROWS override, 80x24 if unknown.
+term_size() {
+  local rows cols
+  { read rows cols < <(stty size </dev/tty) } 2>/dev/null
+  (( cols > 0 )) || cols=80
+  (( rows > 0 )) || rows=24
+  print "${SLEEPTIMER_COLS:-$cols} ${SLEEPTIMER_ROWS:-$rows}"
+}
+
+screen_enter() { IN_TUI=1; printf '\e[?1049h\e[?25l' }
+screen_leave() { (( IN_TUI )) && printf '\e[?25h\e[?1049l'; IN_TUI=0 }
+
+# draw_screen <elapsed> <total> <end-epoch> — redraw the full-screen frame in place.
+draw_screen() {
+  local -a size=($(term_size))
+  local frame=$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)
+  local nl=$'\e[K\n'  # a $'...' replacement inside "${//}" would stay literal
+  printf '\e[H%s\e[J' "${frame//$'\n'/$nl}"
+}
+
+# countdown <total> — redraw until total seconds of wall-clock time pass.
 countdown() {
   local total=$1 start=$EPOCHSECONDS elapsed=0
-  while (( elapsed < total )); do
-    printf '\r%s\e[K' "$(render_bar $elapsed $total)"
-    sleep $TICK
-    elapsed=$(( EPOCHSECONDS - start ))
-  done
-  printf '\r%s\e[K\n' "$(render_bar $total $total)"
+  local end=$(( start + total ))
+  if use_tui; then
+    screen_enter
+    while (( elapsed < total )); do
+      draw_screen $elapsed $total $end
+      sleep $TICK
+      elapsed=$(( EPOCHSECONDS - start ))
+    done
+    draw_screen $total $total $end
+    screen_leave
+  else
+    while (( elapsed < total )); do
+      printf '\r%s\e[K' "$(render_bar $elapsed $total)"
+      sleep $TICK
+      elapsed=$(( EPOCHSECONDS - start ))
+    done
+    printf '\r%s\e[K\n' "$(render_bar $total $total)"
+  fi
 }
 
 # pause_media — pause whatever is "Now Playing" (needs `brew install media-control`).
@@ -91,11 +320,80 @@ go_to_sleep() {
   osascript -e "set volume with output muted" && pmset sleepnow
 }
 
+cancel() {
+  screen_leave
+  print "\nCancelled — not sleeping."
+  exit 130
+}
+
+usage() {
+  print -r -- "sleeptimer — count down, then pause media, mute and put the Mac to sleep.
+
+Usage:
+  sleeptimer                 ask how long
+  sleeptimer <time>          start right away: 45, 90s, 30m, 1,5h, 2 hours
+  sleeptimer themes          list the themes and pick one
+  sleeptimer themes <name>   switch theme: ${(j:, :)THEME_NAMES}
+  sleeptimer -h              show this help
+
+Times:
+  A number without a unit uses the unit you used last time (minutes at first).
+  Decimals work with a comma or a dot: 1,25h is 75 minutes.
+  At the prompt, press Enter to repeat your last timer.
+
+Ctrl+C cancels: nothing is paused, muted or put to sleep.
+Settings are saved in ${CONFIG/#$HOME/~}."
+}
+
+# themes_cmd [name] — switch to <name>, or list the themes with a preview and ask which one.
+themes_cmd() {
+  local name=$1 n i mark choice
+  if [[ -n $name ]]; then
+    is_theme $name || { print -u2 "Unknown theme: $name (choose from: ${(j:, :)THEME_NAMES})"; return 1 }
+    CFG_THEME=$name
+    save_config
+    apply_theme $name
+    print -r -- "Theme set to $name  $(bar_cells 10 10)"
+    return 0
+  fi
+  for i in {1..$#THEME_NAMES}; do
+    n=$THEME_NAMES[i]
+    [[ $n == $CFG_THEME ]] && mark='*' || mark=' '
+    printf '%s %d) %-8s %s  %s\n' $mark $i $n \
+      "$(apply_theme $n; bar_cells 12 12)" "${THEMES[$n]##*|}"
+  done
+  read "choice?Pick a theme (number or name; Enter = keep $CFG_THEME): " || return 0
+  [[ -z $choice ]] && return 0
+  [[ $choice == <1-> ]] && (( choice <= $#THEME_NAMES )) && choice=$THEME_NAMES[choice]
+  themes_cmd $choice
+}
+
 main() {
-  trap 'print "\nCancelled — not sleeping."; exit 130' INT
-  local secs
-  secs=$(ask_duration) || { print; exit 1 }
-  print "Sleeping in $(fmt_time $secs). Ctrl+C to cancel."
+  load_config
+  apply_theme $CFG_THEME
+  case $1 in
+    -h|--help|help) usage; return 0 ;;
+    themes) shift; themes_cmd "$@"; return ;;
+    -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
+  esac
+  trap cancel INT TERM HUP
+  local parsed secs rc
+  if (( $# )); then
+    parsed=$(parse_duration "$*" $CFG_UNIT); rc=$?
+    if (( rc == 2 )); then
+      too_long_msg $CFG_UNIT
+      return 1
+    elif (( rc )); then
+      print -u2 "Can't read \"$*\" as a time. Try 45, 90s, 30m or 1,5h (sleeptimer -h for help)."
+      return 1
+    fi
+  else
+    parsed=$(ask_duration) || { print; return 1 }
+  fi
+  secs=${parsed% *} CFG_UNIT=${parsed#* } CFG_LAST=${parsed% *}
+  save_config
+  print -r -- "Sleeping in $(fmt_time $secs) ($(describe_duration $secs))."
+  print -r -- "Goes to sleep at $(fmt_clock $(( EPOCHSECONDS + secs ))). Ctrl+C to cancel."
   countdown $secs
   go_to_sleep
 }
