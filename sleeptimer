@@ -3,12 +3,26 @@
 
 zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
 
+# Bar and digit characters are multibyte; count widths in characters, not bytes.
+[[ ${LC_ALL:-${LC_CTYPE:-$LANG}} == *[Uu][Tt][Ff](-|)8* ]] || LC_ALL=en_US.UTF-8
+
 BAR_WIDTH=${SLEEPTIMER_BAR_WIDTH:-30}
 TICK=${SLEEPTIMER_TICK:-1}
 MAX_SECS=86400  # 24 hours: guards against "45" meaning 45 hours when the remembered unit is h
 
 typeset -A UNIT_SECS=(s 1 m 60 h 3600)
 typeset -A UNIT_NAME=(s second m minute h hour)
+
+# Themes: name → "fill|empty|fill color|empty color|accent color|description" (256-color codes).
+THEME_NAMES=(night classic ocean forest sunset)
+typeset -A THEMES=(
+  night   '█|░|63|236|147|Deep blue and lavender'
+  classic '#|-||||Plain ASCII, no colors'
+  ocean   '█|░|39|24|117|Bright blue on navy'
+  forest  '▓|░|34|22|120|Greens'
+  sunset  '█|▒|208|52|214|Orange and red'
+)
+DEFAULT_THEME=night
 
 # to_seconds <unit> <amount> — prints seconds; returns 1 on invalid input.
 to_seconds() {
@@ -93,14 +107,36 @@ fmt_clock() {
   fi
 }
 
-# render_bar <elapsed> <total> — e.g. "[#####-----]  50%  00:30 left"
+# is_theme <name> — true if <name> is a known theme.
+is_theme() {
+  (( ${THEME_NAMES[(Ie)$1]} ))
+}
+
+# apply_theme <name> — sets THEME, FILL, EMPTY and the C_* color escapes; returns 1 for an unknown theme.
+apply_theme() {
+  is_theme $1 || return 1
+  local -a t=("${(@s:|:)THEMES[$1]}")
+  THEME=$1 FILL=$t[1] EMPTY=$t[2]
+  if [[ -n $NO_COLOR || -z $t[3] ]]; then
+    C_FILL= C_EMPTY= C_ACCENT= C_DIM= C_RESET=
+  else
+    C_FILL=$'\e[38;5;'$t[3]m C_EMPTY=$'\e[38;5;'$t[4]m C_ACCENT=$'\e[38;5;'$t[5]m
+    C_DIM=$'\e[2m' C_RESET=$'\e[0m'
+  fi
+}
+
+# bar_cells <filled> <empty> — a colored run of FILL then EMPTY characters.
+bar_cells() {
+  print -rn -- "$C_FILL${(pl:$1::$FILL:)}$C_EMPTY${(pl:$2::$EMPTY:)}$C_RESET"
+}
+
+# render_bar <elapsed> <total> [width] — e.g. "[#####-----]  50%  00:30 left"
 render_bar() {
-  local elapsed=$1 total=$2
+  local elapsed=$1 total=$2 width=${3:-$BAR_WIDTH}
   (( elapsed > total )) && elapsed=$total
   local pct=$(( elapsed * 100 / total ))
-  local filled=$(( elapsed * BAR_WIDTH / total ))
-  local bar="${(l:filled::#:)}${(l:$(( BAR_WIDTH - filled ))::-:)}"
-  printf '[%s] %3d%%  %s left' "$bar" $pct "$(fmt_time $(( total - elapsed )))"
+  local filled=$(( elapsed * width / total ))
+  printf '[%s] %3d%%  %s left' "$(bar_cells $filled $(( width - filled )))" $pct "$(fmt_time $(( total - elapsed )))"
 }
 
 # ask_duration — prompt for unit then amount; prints total seconds.
@@ -157,6 +193,7 @@ go_to_sleep() {
 }
 
 main() {
+  apply_theme $DEFAULT_THEME
   trap 'print "\nCancelled — not sleeping."; exit 130' INT
   local secs
   secs=$(ask_duration) || { print; exit 1 }

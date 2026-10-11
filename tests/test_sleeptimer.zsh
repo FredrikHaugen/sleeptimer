@@ -2,7 +2,9 @@
 # Plain-zsh tests for sleeptimer. Run: zsh tests/test_sleeptimer.zsh
 
 SLEEPTIMER_BAR_WIDTH=10
-source "${0:A:h}/../sleeptimer"
+SCRIPT="${0:A:h}/../sleeptimer"
+source $SCRIPT
+apply_theme classic  # plain "#"/"-" and no color codes, so expected strings stay readable
 
 fails=0
 assert_eq() {  # assert_eq <name> <expected> <actual>
@@ -85,11 +87,24 @@ assert_eq "clock today"     "01:00"           "$(TZ=UTC fmt_clock 3600 0)"
 assert_eq "clock tomorrow"  "01:00 tomorrow"  "$(TZ=UTC fmt_clock 90000 82800)"
 assert_eq "clock later"     "Sun 11:20"       "$(TZ=UTC fmt_clock 300000 0)"
 
-# render_bar (BAR_WIDTH=10)
+# themes
+assert_eq "theme default is first"  "night" "$DEFAULT_THEME"
+assert_fails "apply unknown theme"  apply_theme nope
+assert_fails "apply glob theme"     apply_theme '*'
+assert_eq "night colors bar" "yes" \
+  "$( apply_theme night; [[ $(bar_cells 2 2) == $'\e[38;5;63m██\e[38;5;236m░░\e[0m' ]] && print yes )"
+assert_eq "NO_COLOR strips colors" "██░░" "$( NO_COLOR=1 apply_theme night; bar_cells 2 2 )"
+assert_eq "every theme applies" "yes" \
+  "$( for t in $THEME_NAMES; do apply_theme $t || exit 1; [[ -n $FILL && -n $EMPTY ]] || exit 1; done; print yes )"
+assert_eq "C locale counts chars" "5" \
+  "$(LC_ALL=C zsh -c "source ${(q)SCRIPT}; NO_COLOR=1 apply_theme night; x=\$(bar_cells 3 2); print \${#x}")"
+
+# render_bar (classic theme, BAR_WIDTH=10)
 assert_eq "bar empty"    "[----------]   0%  01:00 left"  "$(render_bar 0 60)"
 assert_eq "bar half"     "[#####-----]  50%  00:30 left"  "$(render_bar 30 60)"
 assert_eq "bar full"     "[##########] 100%  00:00 left"  "$(render_bar 60 60)"
 assert_eq "bar overflow" "[##########] 100%  00:00 left"  "$(render_bar 99 60)"
+assert_eq "bar width arg" "[##--]  50%  00:30 left"       "$(render_bar 30 60 4)"
 
 # ask_duration: re-prompts on bad unit and bad amount; accepts word units
 assert_eq "ask_duration retries" "180" \
@@ -125,7 +140,7 @@ assert_eq "pause_media missing tool tip" "yes" \
 rm -rf $stub_dir
 
 # end-to-end: executed script with piped input, dry run
-e2e=$(print -l s 1 | SLEEPTIMER_DRY_RUN=1 zsh "${0:A:h}/../sleeptimer" 2>/dev/null)
+e2e=$(print -l s 1 | SLEEPTIMER_DRY_RUN=1 zsh $SCRIPT 2>/dev/null)
 assert_eq "e2e announces" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
 assert_eq "e2e dry-runs"  "yes" "$([[ $e2e == *'DRY RUN: pause + mute + sleep'* ]] && print yes)"
 
