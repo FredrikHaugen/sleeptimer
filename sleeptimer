@@ -375,56 +375,82 @@ yolo_guard() {
 }
 
 MEDIA_APPS=(Music Spotify)  # paused directly with AppleScript when they're open, media-control or not
-PERMISSION_SECS=${SLEEPTIMER_PERMISSION_SECS:-60}  # how long the start-of-timer permission query may wait
 
 # app_running <name> — true if this user has <name> open (another logged-in user's copy doesn't count).
 app_running() {
   pgrep -xqU $UID $1 2>/dev/null
 }
 
-# with_timeout <seconds> <cmd...> — run <cmd>, killing it after <seconds>; its exit status, or 124 on timeout.
-# Guards the end of the timer: a hung app, or a permission dialog nobody answers, must not stop the sleep.
-# A command that ignores TERM gets KILL a second later, so the final wait can't hang.
-with_timeout() {
-  local secs=$1; shift
-  "$@" & local pid=$!
+# app_script <app> <command> — AppleScript that sends <command> only if <app> is still running, so it
+# can never open an app that quit after app_running checked.
+app_script() {
+  print -r -- "if application \"$1\" is running then tell application \"$1\" to $2"
+}
+
+# finish_within <seconds> <pid...> — wait for background jobs, giving them <seconds> in total. Any still
+# running get TERM, then KILL a second later, so this never blocks longer than <seconds> + 1.
+# Their exit statuses stay available to `wait <pid>`.
+finish_within() {
+  local secs=$1 p; shift
+  local -a left=($@)
   repeat $(( secs * 5 )); do
-    kill -0 $pid 2>/dev/null || { wait $pid; return }
+    left=(${left:#0}); for p in $left; do kill -0 $p 2>/dev/null || left=(${left:#$p}); done
+    (( $#left )) || return 0
     sleep 0.2
   done
-  kill $pid 2>/dev/null
-  repeat 5; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
-  kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
-  return 124
+  kill $left 2>/dev/null
+  repeat 5; do
+    for p in $left; do kill -0 $p 2>/dev/null || left=(${left:#$p}); done
+    (( $#left )) || return 0
+    sleep 0.2
+  done
+  kill -9 $left 2>/dev/null
+  return 0
+}
+
+# kill_jobs — end every background job this shell still runs (pauses, the permission query).
+# Only live jobs of this shell are touched, so a reused pid can never be hit.
+kill_jobs() {
+  local j
+  for j in ${(k)jobstates}; do kill -9 %$j 2>/dev/null; done
+  return 0
 }
 
 # pause_media — pause "Now Playing" with media-control (brew install media-control), and Music and
-# Spotify directly when they're open. Never fails: nothing playing, a missing tool or a hung app
-# must not stop the Mac sleeping.
+# Spotify directly when they're open. All at once, 3 s in total. Never fails: nothing playing, a
+# missing tool or a hung app must not stop the Mac sleeping.
 pause_media() {
-  local app
+  local app pid
+  local -A pids  # assigning $! straight to an element stores the text "$!", so go through $pid
   if (( $+commands[media-control] )); then
-    with_timeout 3 media-control pause >/dev/null 2>&1
+    media-control pause >/dev/null 2>&1 &
+    pid=$!; pids[media-control]=$pid
   else
     print -u2 "Tip: brew install media-control to also pause YouTube and other players."
   fi
   for app in $MEDIA_APPS; do
-    app_running $app || continue  # "tell application" would open an app that isn't running
-    with_timeout 3 osascript -e "tell application \"$app\" to pause" >/dev/null 2>&1 ||
-      print -u2 "Couldn't pause $app."
+    app_running $app || continue
+    osascript -e "$(app_script $app pause)" >/dev/null 2>&1 &
+    pid=$!; pids[$app]=$pid
+  done
+  (( $#pids )) || return 0
+  finish_within 3 $pids
+  for app in $MEDIA_APPS; do
+    [[ -n $pids[$app] ]] || continue
+    wait $pids[$app] 2>/dev/null || print -u2 "Couldn't pause $app."
   done
   return 0
 }
 
 # ask_media_permission — at the start of the timer, send open media apps a harmless query. macOS asks
 # once whether Terminal may control each app; this makes it ask now, while you're awake to click OK,
-# instead of at sleep time. Runs in the background so the countdown never waits for the answer.
+# instead of at sleep time. Runs in the background; kill_jobs ends it when the timer ends or stops.
 ask_media_permission() {
   [[ -n $SLEEPTIMER_DRY_RUN ]] && return 0
   local app
   for app in $MEDIA_APPS; do
-    app_running $app || continue  # "tell application" would open an app that isn't running
-    ( with_timeout $PERMISSION_SECS osascript -e "tell application \"$app\" to get player state" ) >/dev/null 2>&1 &!
+    app_running $app || continue
+    osascript -e "$(app_script $app 'get player state')" >/dev/null 2>&1 &
   done
   return 0
 }
@@ -450,6 +476,7 @@ go_to_sleep() {
 
 cancel() {
   (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
+  kill_jobs
   screen_leave
   print "\nCancelled — not sleeping."
   exit 130
@@ -459,6 +486,7 @@ cancel() {
 # message now, so print none, and ignore errors from a terminal that is already gone.
 hangup() {
   (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
+  kill_jobs
   { screen_leave } 2>/dev/null
   exit 129
 }
@@ -611,7 +639,9 @@ main() {
     print -u2 "Heads up: sleep is turned off system-wide, so your Mac may stay awake when the timer ends. To fix it: sleeptimer yolo off"
     use_tui && sleep 3  # give the warning time to be read before full screen covers it
   fi
-  if ! countdown $secs; then
+  countdown $secs; local late=$?
+  kill_jobs  # the permission query has had the whole countdown
+  if (( late )); then
     print -r -- "Time ran out while your Mac was asleep, so it won't go to sleep now."
     return 3
   fi

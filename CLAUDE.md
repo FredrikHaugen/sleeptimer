@@ -22,14 +22,14 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 ## Architecture
 
 - **Sourceable script.** The last line, `[[ $ZSH_EVAL_CONTEXT == toplevel ]] && main "$@"`, runs `main` only when the script is executed. The test file `source`s the script and calls functions directly. It also runs the script as a subprocess (`zsh $SCRIPT …`) for end-to-end checks.
-- **Pure functions vs I/O.** Parsing and formatting are pure and print to stdout: `parse_duration`, `fmt_dec`, `describe_duration`, `fmt_time`, `fmt_clock`, `render_bar`, `render_big` and `render_screen`. I/O is kept to thin wrappers: `ask_duration`, `load_config`/`save_config`, `with_timeout`, `ask_media_permission`, `draw_screen`, `countdown`, `go_to_sleep` and `main`. Put new logic in a pure function so it can be tested.
+- **Pure functions vs I/O.** Parsing and formatting are pure and print to stdout: `parse_duration`, `fmt_dec`, `describe_duration`, `fmt_time`, `fmt_clock`, `render_bar`, `render_big` and `render_screen`. I/O is kept to thin wrappers: `ask_duration`, `load_config`/`save_config`, `finish_within`, `kill_jobs`, `pause_media`, `ask_media_permission`, `draw_screen`, `countdown`, `go_to_sleep` and `main`. Put new logic in a pure function so it can be tested.
 - **Durations** travel as the string `"<seconds> <unit>"`, where the unit is `s|m|h`. `parse_duration` returns 1 for invalid input and 2 for over `MAX_SECS` (24 h). A bare number uses the remembered unit `CFG_UNIT`.
 - **Settings** live in a `key=value` file (`unit`, `theme`, `last`), read into the `CFG_*` globals. Bad values fall back to defaults, and `save_config` never fails.
 - **Themes** are `THEMES[name]="fill|empty|fill-color|empty-color|accent|description"`, with order and numbering from `THEME_NAMES`. `apply_theme` sets the `FILL`/`EMPTY`/`C_*` globals that all the rendering functions read. `NO_COLOR` disables colour.
 - **Display modes:**
   - **Full screen** is used when stdout is a TTY. It uses the alternate screen, big digits, and a bar filling all remaining rows. `render_screen` must return exactly `rows` lines, none wider than `cols`; a wrapped line scrolls and garbles the redraw.
   - **One-line `render_bar`** is used otherwise.
-  - `cancel` (trapped on INT/TERM) must call `screen_leave` before exiting 130. `hangup` (HUP, i.e. the window was closed) restores the screen with errors ignored, prints nothing and exits 129.
+  - `cancel` (trapped on INT/TERM) must call `kill_jobs` and `screen_leave` before exiting 130. `hangup` (HUP, i.e. the window was closed) calls `kill_jobs`, restores the screen with errors ignored, prints nothing and exits 129.
 - **YOLO mode** (`sleeptimer yolo`) is the opposite of the timer. `caffeinate -dims -w $$` blocks normal sleep. Lid-close sleep needs root: a `nohup sudo -n /bin/zsh -f -c "$(yolo_guard …)"` guard sets `pmset -a disablesleep 1` and polls the script's pid, then writes back the *previous* `SleepDisabled` value (`sleep_disabled`).
   - Never replace the polling with a trap: it must survive `kill -9` and closed windows.
   - The root shell runs with `-f` (no user startup files), a fixed `PATH` and detached stdio. Keep it that way, because macOS sudo keeps the user's `HOME` and `PATH`.
@@ -46,7 +46,6 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 | `SLEEPTIMER_TUI` | `1`/`0` forces full-screen or one-line mode |
 | `SLEEPTIMER_COLS` / `SLEEPTIMER_ROWS` | Fake terminal size |
 | `SLEEPTIMER_TICK` | Seconds between redraws |
-| `SLEEPTIMER_PERMISSION_SECS` | Time limit for the background permission query `ask_media_permission` starts |
 | `SLEEPTIMER_BAR_WIDTH` | One-line bar width |
 
 Tests call `apply_theme classic` so expected strings are plain `#`/`-` with no escape codes.
@@ -70,6 +69,7 @@ Tests that call the real `pause_media`/`go_to_sleep`/`ask_media_permission` code
 - Pad with a variable string using the `p` flag: `${(pl:N::$FILL:)}`.
 - Use `"${(@s:|:)str}"` to keep empty fields when splitting.
 - `$(…)` strips trailing newlines.
+- `h[key]=$!` stores the literal text `$!` in an associative array. Copy the pid to a plain variable first (`pid=$!; h[key]=$pid`).
 - `read "var?prompt"` only shows the prompt on a TTY, so tests check `duration_prompt` instead.
 - Check theme names with `${THEME_NAMES[(Ie)$x]}`, not `$+THEMES[$x]`, which treats `*` as a wildcard.
 - A background job in a non-interactive shell ignores SIGINT, so tests cancel with TERM.

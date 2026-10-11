@@ -238,16 +238,17 @@ assert_eq "term_size override" "100 40" "$(SLEEPTIMER_COLS=100 SLEEPTIMER_ROWS=4
 # go_to_sleep dry run never touches the system
 assert_eq "go_to_sleep dry run" "DRY RUN: pause + mute + sleep" "$(SLEEPTIMER_DRY_RUN=1 go_to_sleep)"
 
-# with_timeout: passes the exit status through; kills a hung command
-assert_eq "with_timeout passes status" "0 1 7" \
-  "$(with_timeout 2 true; a=$?; with_timeout 2 false; b=$?; with_timeout 2 sh -c 'exit 7'; print "$a $b $?")"
+# finish_within: waits for background jobs, kills the ones still running after the limit (TERM, then KILL)
+assert_eq "finish_within keeps exit statuses" "0 1 7" \
+  "$(true & a=$!; false & b=$!; sh -c 'exit 7' & c=$!; finish_within 2 $a $b $c; wait $a; x=$?; wait $b; y=$?; wait $c; print "$x $y $?")"
 t0=$EPOCHSECONDS
-assert_eq "with_timeout kills hung command" "124" "$(with_timeout 1 sleep 10; print $?)"
-assert_eq "with_timeout is quick" "yes" "$( (( EPOCHSECONDS - t0 <= 3 )) && print yes )"
+assert_eq "finish_within kills hung jobs together" "143 143" \
+  "$(sleep 10 & a=$!; sleep 10 & b=$!; finish_within 1 $a $b; wait $a; x=$?; wait $b; print "$x $?")"
+assert_eq "finish_within shares one limit" "yes" "$( (( EPOCHSECONDS - t0 <= 3 )) && print yes )"
 t0=$EPOCHSECONDS
-assert_eq "with_timeout kills a command that ignores TERM" "124" \
-  "$(with_timeout 1 sh -c 'trap "" TERM; sleep 8' >/dev/null; print $?)"
-assert_eq "with_timeout ignoring TERM is still quick" "yes" "$( (( EPOCHSECONDS - t0 <= 4 )) && print yes )"
+assert_eq "finish_within kills a job that ignores TERM" "137" \
+  "$(sh -c 'trap "" TERM; sleep 8' >/dev/null & a=$!; finish_within 1 $a; wait $a; print $?)"
+assert_eq "finish_within ignoring TERM is still quick" "yes" "$( (( EPOCHSECONDS - t0 <= 4 )) && print yes )"
 
 # pause_media: "Now Playing" via media-control, plus Music/Spotify directly when they're running; never fails.
 # path=(... $fake_bin /bin): fake pgrep/osascript only, so the tests never pause or open real apps.
@@ -264,8 +265,8 @@ assert_eq "pause_media missing tool tip" "yes" \
 : > $FAKE_LOG
 ( path=($fake_bin /bin); export STUB_RUNNING='Music Spotify'; pause_media 2>/dev/null )
 assert_eq "pause_media pauses Music and Spotify" \
-  'osascript -e tell application "Music" to pause
-osascript -e tell application "Spotify" to pause' "$(<$FAKE_LOG)"
+  'osascript -e if application "Music" is running then tell application "Music" to pause
+osascript -e if application "Spotify" is running then tell application "Spotify" to pause' "$(sort $FAKE_LOG)"
 : > $FAKE_LOG
 ( path=($fake_bin /bin); export STUB_RUNNING=; pause_media 2>/dev/null )
 assert_eq "pause_media never opens apps" "" "$(<$FAKE_LOG)"
@@ -274,8 +275,8 @@ assert_eq "pause_media never opens apps" "" "$(<$FAKE_LOG)"
 assert_eq "pause_media both ways" "yes" \
   "$([[ $(<$STUB_LOG) == pause && $(<$FAKE_LOG) == *'"Music" to pause'* ]] && print yes)"
 t0=$EPOCHSECONDS
-( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1; pause_media 2>/dev/null )
-assert_eq "pause_media gives up on a hung app" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
+( path=($stub_dir $fake_bin /bin); export STUB_RUNNING='Music Spotify' STUB_OSASCRIPT_HANG=2; pause_media 2>/dev/null )
+assert_eq "pause_media gives up on hung apps within ~4 s total" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
 pm_err=$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_RC=1; pause_media 2>&1 >/dev/null )
 assert_eq "pause_media says when an app didn't pause" "yes" "$([[ $pm_err == *"Couldn't pause Music"* ]] && print yes)"
 assert_eq "pause_media quiet when all is well" "" "$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music; pause_media 2>&1 )"
@@ -286,8 +287,8 @@ rm -rf $stub_dir
 # "Terminal wants to control Music" question shows up while the user is awake, not at sleep time
 ( path=($fake_bin /bin); export STUB_RUNNING='Music Spotify'; ask_media_permission ); sleep 0.5
 assert_eq "permission asked at start" \
-  'osascript -e tell application "Music" to get player state
-osascript -e tell application "Spotify" to get player state' "$(sort $FAKE_LOG)"
+  'osascript -e if application "Music" is running then tell application "Music" to get player state
+osascript -e if application "Spotify" is running then tell application "Spotify" to get player state' "$(sort $FAKE_LOG)"
 : > $FAKE_LOG
 ( path=($fake_bin /bin); export STUB_RUNNING=; ask_media_permission ); sleep 0.5
 assert_eq "permission never opens apps" "" "$(<$FAKE_LOG)"
@@ -297,10 +298,9 @@ t0=$EPOCHSECONDS
 ( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1; ask_media_permission )
 assert_eq "permission doesn't wait for an answer" "yes" "$( (( EPOCHSECONDS - t0 <= 1 )) && print yes )"
 sleep 0.5  # let that background fake log its call before the log is cleared below
-t0=$EPOCHSECONDS
-( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2 SLEEPTIMER_PERMISSION_SECS=1; source $SCRIPT; ask_media_permission )
-sleep 3.5
-assert_eq "unanswered permission query is cleaned up" "" "$(pgrep -f "$fake_bin/osascript")"
+assert_eq "kill_jobs ends a pending permission query" "" \
+  "$( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2; ask_media_permission; sleep 0.3; kill_jobs; sleep 0.3
+      pgrep -f "$fake_bin/osascript" )"
 : > $FAKE_LOG
 
 # go_to_sleep, the real (non-dry-run) path, with fakes only: path has no real pmset/osascript (see the tripwire)
@@ -408,6 +408,17 @@ assert_eq "hangup during heads-up exit 129"   "129" "$?"
 assert_eq "hangup during heads-up never sleeps" "no" "$([[ $(<$log) == *'DRY RUN'* ]] && print yes || print no)"
 rm -f $log
 assert_eq "hangup in subshell silent" "" "$(hangup 2>&1)"
+
+# end-to-end, not a dry run, but PATH holds only the fakes and /bin (see the tripwire), and it is
+# stopped long before the timer ends: Ctrl+C or a closed window must also end the permission query
+for sig in TERM HUP; do
+  env PATH=$fake_bin:/bin STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2 SLEEPTIMER_TUI=0 /bin/zsh $SCRIPT 30s >/dev/null 2>&1 &
+  pid=$!
+  sleep 1.5
+  kill -$sig $pid; wait $pid
+  sleep 0.5
+  assert_eq "$sig ends the permission query" "" "$(pgrep -f "$fake_bin/osascript")"
+done
 
 # sleep_disabled reads pmset -g
 assert_eq "sleep_disabled 0" "0" "$( path=($fake_bin $path); STUB_SLEEP_DISABLED=0; sleep_disabled )"

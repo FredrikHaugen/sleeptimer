@@ -224,7 +224,6 @@ Environment variables:
 |---|---|---|
 | `SLEEPTIMER_DRY_RUN` | Any non-empty value prints a message instead of pausing, muting and sleeping | off |
 | `SLEEPTIMER_TICK` | Seconds between progress-bar redraws | `1` |
-| `SLEEPTIMER_PERMISSION_SECS` | How long the start-of-timer query to Music/Spotify may wait for the permission question to be answered | `60` |
 | `SLEEPTIMER_BAR_WIDTH` | Width of the one-line bar (used when output isn't a terminal) | `30` |
 | `SLEEPTIMER_CONFIG` | Where settings (last unit, last time, theme) are saved | `~/.config/sleeptimer/config` |
 | `SLEEPTIMER_TUI` | `1` forces the full-screen view, `0` forces the one-line bar | full screen when output is a terminal |
@@ -237,12 +236,12 @@ When the timer ends, it runs exactly:
 
 ```
 media-control pause   # skipped (with a tip) if media-control isn't installed; errors ignored
-osascript -e 'tell application "Music" to pause'     # only if Music is open
-osascript -e 'tell application "Spotify" to pause'   # only if Spotify is open
+osascript -e 'if application "Music" is running then tell application "Music" to pause'
+osascript -e 'if application "Spotify" is running then tell application "Spotify" to pause'
 osascript -e "set volume with output muted" && pmset sleepnow
 ```
 
-Each pause is given 3 seconds, then skipped, so a hung app can't keep the Mac awake.
+The pauses run at the same time and get 3 seconds in total, then are stopped, so a hung app can't keep the Mac awake.
 When the timer starts, open Music and Spotify get a harmless `get player state`
 query, so macOS asks for the one-time Automation permission while you're awake.
 
