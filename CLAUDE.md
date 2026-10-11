@@ -30,7 +30,7 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
   - **Full screen** is used when stdout is a TTY. It uses the alternate screen, big digits, and a bar filling all remaining rows. `render_screen` must return exactly `rows` lines, none wider than `cols`; a wrapped line scrolls and garbles the redraw.
   - **One-line `render_bar`** is used otherwise.
   - `cancel` (trapped on INT/TERM/QUIT) must call `kill_jobs` and `screen_leave` before exiting 130. `hangup` (HUP, i.e. the window was closed) calls `kill_jobs`, restores the screen with errors ignored, prints nothing and exits 129. In a `$(…)` helper it exits 129 too, and `main` turns that into `hangup` (HUP at the `How long?` prompt).
-  - After `countdown` returns, `main` ignores INT/TERM/QUIT/HUP: pause + mute + sleep always finishes as one step.
+  - After `countdown` returns, `main` ignores INT/TERM/QUIT/HUP/TSTP/TTIN/TTOU/PIPE: pause + mute + sleep always finishes as one step. Children inherit the ignored signals; `finish_within` still ends a hung pause with KILL.
   - Background helpers (pauses, the permission query) start through `tethered`, which kills them within ~0.2 s once the script is gone, even after `kill -9`, like `caffeinate -w`. `kill_jobs` ends them on every trapped exit and when the countdown ends.
 - **YOLO mode** (`sleeptimer yolo`) is the opposite of the timer. `caffeinate -dims -w $$` blocks normal sleep. Lid-close sleep needs root: a `nohup sudo -n /bin/zsh -f -c "$(yolo_guard …)"` guard sets `pmset -a disablesleep 1` and polls the script's pid, then writes back the *previous* `SleepDisabled` value (`sleep_disabled`).
   - Never replace the polling with a trap: it must survive `kill -9` and closed windows.

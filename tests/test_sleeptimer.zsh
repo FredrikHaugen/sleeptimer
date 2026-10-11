@@ -30,17 +30,18 @@ assert_fails() {  # assert_fails <name> <cmd...>
 # The fake sudo points the guard's fixed PATH at the fakes. Every call is appended to $FAKE_LOG.
 # STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM; the mute line never hangs); STUB_SLEEPNOW_RC sets
 # "pmset sleepnow"'s; STUB_RUNNING lists the apps the fake pgrep reports as running.
+# STUB_PMSET_STUCK=1 makes the fake pmset ignore "disablesleep 0" (a guard that never restores).
 # STUB_WAKETIME is the epoch second the fake "sysctl -n kern.waketime" reports as the last wake (default 0).
 fake_bin=$(mktemp -d)
 export FAKE_BIN=$fake_bin FAKE_LOG=$fake_bin/calls.log FAKE_STATE=$fake_bin/state FAKE_UID=$UID
 export STUB_SLEEP_DISABLED=0 STUB_SUDO_RC=0 STUB_SUDO_N_RC=0
-export STUB_OSASCRIPT_RC=0 STUB_OSASCRIPT_HANG=0 STUB_SLEEPNOW_RC=0 STUB_RUNNING=
+export STUB_OSASCRIPT_RC=0 STUB_OSASCRIPT_HANG=0 STUB_SLEEPNOW_RC=0 STUB_RUNNING= STUB_PMSET_STUCK=0
 print -l '#!/bin/sh' \
   'if [ "$1" = "-g" ]; then v=$(cat "$FAKE_STATE" 2>/dev/null || echo "$STUB_SLEEP_DISABLED")' \
   '  printf "System-wide power settings:\n SleepDisabled\t\t%s\nCurrently in use:\n sleep 1\n" "$v"; exit 0; fi' \
   'echo "pmset $*" >> "$FAKE_LOG"' \
   '[ "$1" = "sleepnow" ] && exit "$STUB_SLEEPNOW_RC"' \
-  '[ "$2" = "disablesleep" ] && echo "$3" > "$FAKE_STATE"' \
+  'if [ "$2" = "disablesleep" ] && ! { [ "$3" = 0 ] && [ "$STUB_PMSET_STUCK" = 1 ]; }; then echo "$3" > "$FAKE_STATE"; fi' \
   'exit 0' > $fake_bin/pmset
 print -l '#!/bin/sh' \
   'echo "sudo $*" >> "$FAKE_LOG"' \
@@ -49,7 +50,10 @@ print -l '#!/bin/sh' \
   'if [ "$1" = "-n" ]; then [ "$STUB_SUDO_N_RC" = 0 ] || exit "$STUB_SUDO_N_RC"; shift; fi' \
   'if [ "$1" = "/bin/zsh" ]; then exec zsh "$2" "$3" "$(printf %s "$4" | sed "s#PATH=/usr/bin#PATH=$FAKE_BIN:/usr/bin#")"; fi' \
   'exec "$@"' > $fake_bin/sudo
-print -l '#!/bin/sh' 'echo "caffeinate $*" >> "$FAKE_LOG"' > $fake_bin/caffeinate
+print -l '#!/bin/sh' \
+  'echo "caffeinate $*" >> "$FAKE_LOG"; echo "caffeinate pid $$" >> "$FAKE_LOG"' \
+  "trap 'echo \"caffeinate stopped\" >> \"\$FAKE_LOG\"; exit 0' TERM" \
+  'while kill -0 "$3" 2>/dev/null; do sleep 0.2; done' > $fake_bin/caffeinate
 print -l '#!/bin/sh' \
   'echo "osascript $*" >> "$FAKE_LOG"' \
   'case "$2" in *"set volume"*) ;; *) [ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30;; esac' \
@@ -279,6 +283,9 @@ assert_eq "pause_media both ways" "yes" \
 t0=$EPOCHSECONDS
 ( path=($stub_dir $fake_bin /bin); export STUB_RUNNING='Music Spotify' STUB_OSASCRIPT_HANG=2; pause_media 2>/dev/null )
 assert_eq "pause_media gives up on hung apps within ~4 s total" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
+pm_hung=$( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2; pause_media 2>&1 >/dev/null )
+assert_eq "pause_media says when an app hung" "yes" \
+  "$([[ $pm_hung == *"Music didn't answer in time"* && $pm_hung != *Automation* ]] && print yes)"
 pm_err=$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_RC=1; pause_media 2>&1 >/dev/null )
 assert_eq "pause_media says when an app didn't pause" "yes" \
   "$([[ $pm_err == *"Couldn't pause Music"*'Privacy & Security → Automation'* ]] && print yes)"
@@ -337,6 +344,8 @@ e2e=$(print 1s | run 2>/dev/null)
 assert_eq "e2e announces"      "yes" "$([[ $e2e == *'Sleeping in 00:01 (1 second = 0.02 minutes).'* ]] && print yes)"
 assert_eq "e2e shows sleep at" "yes" "$([[ $e2e == *'Goes to sleep at '[0-9][0-9]:[0-9][0-9]* ]] && print yes)"
 assert_eq "e2e dry-runs"       "yes" "$([[ $e2e == *'DRY RUN: pause + mute + sleep'* ]] && print yes)"
+assert_eq "e2e says time's up" "yes" \
+  "$([[ $e2e == *"Time's up: pausing, muting and putting your Mac to sleep."*'DRY RUN'* ]] && print yes)"
 assert_eq "e2e remembers unit" "yes" "$( grep -qx 'unit=s' $SLEEPTIMER_CONFIG && grep -qx 'last=1' $SLEEPTIMER_CONFIG && print yes )"
 e2e=$(print 1 | run 2>/dev/null)
 assert_eq "e2e bare number uses remembered unit" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
@@ -439,6 +448,15 @@ for sig in HUP INT; do
   assert_eq "$sig during the final step still sleeps" "yes" "$(grep -qx 'pmset sleepnow' $FAKE_LOG && print yes)"
   assert_eq "$sig during the final step exit 0" "0" "$rc"
 done
+# Ctrl+Z in the final step must not freeze it half done (an fg hours later would sleep the Mac by surprise)
+: > $FAKE_LOG
+env PATH=$fake_bin:/bin STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1 SLEEPTIMER_TUI=0 /bin/zsh $SCRIPT 1s >/dev/null 2>&1 &
+pid=$!
+sleep 2.5
+kill -TSTP $pid
+sleep 4
+assert_eq "TSTP during the final step still sleeps" "yes" "$(grep -qx 'pmset sleepnow' $FAKE_LOG && print yes)"
+kill -CONT $pid 2>/dev/null; wait $pid
 : > $FAKE_LOG
 
 # sleep_disabled reads pmset -g

@@ -392,15 +392,17 @@ app_script() {
 
 # finish_within <seconds> <pid...> — wait for background jobs, giving them <seconds> in total. Any still
 # running get TERM, then KILL a second later, so this never blocks longer than <seconds> + 1.
-# Their exit statuses stay available to `wait <pid>`.
+# Their exit statuses stay available to `wait <pid>`; the ones that had to be killed are in TIMED_OUT.
 finish_within() {
   local secs=$1 p; shift
   local -a left=($@)
+  TIMED_OUT=()
   repeat $(( secs * 5 )); do
     left=(${left:#0}); for p in $left; do kill -0 $p 2>/dev/null || left=(${left:#$p}); done
     (( $#left )) || return 0
     sleep 0.2
   done
+  TIMED_OUT=($left)
   kill $left 2>/dev/null
   repeat 5; do
     for p in $left; do kill -0 $p 2>/dev/null || left=(${left:#$p}); done
@@ -420,7 +422,7 @@ tethered() {
     local c=$!
     trap 'kill -9 $c 2>/dev/null; exit 143' TERM INT HUP QUIT
     while kill -0 $$ 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 0.2; done
-    kill -9 $c 2>/dev/null
+    kill -0 $$ 2>/dev/null || kill -9 $c 2>/dev/null  # only when the script is gone: <cmd> is still ours then
     wait $c
   } &
 }
@@ -456,8 +458,11 @@ pause_media() {
   finish_within 3 $pids
   for app in $MEDIA_APPS; do
     [[ -n $pids[$app] ]] || continue
-    wait $pids[$app] 2>/dev/null ||
+    if (( ${TIMED_OUT[(Ie)$pids[$app]]} )); then
+      print -u2 "$app didn't answer in time, so it may still be playing."
+    elif ! wait $pids[$app] 2>/dev/null; then
       print -u2 "Couldn't pause $app. If Terminal isn't allowed to control it: System Settings → Privacy & Security → Automation."
+    fi
   done
   return 0
 }
@@ -660,12 +665,15 @@ main() {
     use_tui && sleep 3  # give the warning time to be read before full screen covers it
   fi
   countdown $secs; local late=$?
-  trap '' INT TERM QUIT HUP  # time is up: finish pause + mute + sleep as one step, never half of it
+  # Time is up: finish pause + mute + sleep as one step, never half of it. Ctrl+Z, a closed window or a
+  # closed pipe can't stop it midway either (an fg hours later would sleep the Mac by surprise).
+  trap '' INT TERM QUIT HUP TSTP TTIN TTOU PIPE
   kill_jobs  # the permission query has had the whole countdown
   case $late in
     1) print -r -- "Time ran out while your Mac was asleep, so it won't go to sleep now."; return 3 ;;
     2) print -r -- "The timer ended late, so it won't put your Mac to sleep now."; return 3 ;;
   esac
+  print -r -- "Time's up: pausing, muting and putting your Mac to sleep."
   go_to_sleep
 }
 

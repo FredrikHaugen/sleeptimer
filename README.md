@@ -118,8 +118,9 @@ Goes to sleep at 23:45. Ctrl+C to cancel.
 **Leave the Terminal window open.** You can minimize it with the yellow button,
 but don't close it, or the timer stops.
 
-When the bar reaches 100%, whatever is playing gets paused, the sound turns off
-and the Mac goes to sleep.
+When the bar reaches 100%, you'll see `Time's up: pausing, muting and putting
+your Mac to sleep.` Whatever is playing gets paused, the sound turns off and the
+Mac goes to sleep.
 
 ---
 
@@ -207,6 +208,7 @@ click the speaker icon at the top of the screen.
 | `Tip: brew install media-control ...` when the timer ends | Only Apple Music and Spotify were paused, because Step 4 was skipped. Do **Step 4** to pause YouTube and other players too. |
 | Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. For Apple Music or Spotify, check **System Settings → Privacy & Security → Automation** and allow Terminal to control them. |
 | `Couldn't pause Music. ...` (or Spotify) | The app didn't answer within 3 seconds, or Terminal isn't allowed to control it. Allow Terminal in **System Settings → Privacy & Security → Automation**. The Mac still went to sleep. |
+| `Music didn't answer in time, so it may still be playing.` (or Spotify) | The app was busy or frozen when the timer ended. The Mac still muted and went to sleep. |
 | I want a different time | Press **Control + C** to cancel, then run `sleeptimer` again. |
 
 ---
