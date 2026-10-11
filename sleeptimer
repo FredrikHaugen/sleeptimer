@@ -9,6 +9,7 @@ zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
 BAR_WIDTH=${SLEEPTIMER_BAR_WIDTH:-30}
 TICK=${SLEEPTIMER_TICK:-1}
 MAX_SECS=86400  # 24 hours: guards against "45" meaning 45 hours when the remembered unit is h
+CONFIG=${SLEEPTIMER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleeptimer/config}
 
 typeset -A UNIT_SECS=(s 1 m 60 h 3600)
 typeset -A UNIT_NAME=(s second m minute h hour)
@@ -137,6 +138,27 @@ render_bar() {
   local pct=$(( elapsed * 100 / total ))
   local filled=$(( elapsed * width / total ))
   printf '[%s] %3d%%  %s left' "$(bar_cells $filled $(( width - filled )))" $pct "$(fmt_time $(( total - elapsed )))"
+}
+
+# load_config — read unit/theme/last from $CONFIG into CFG_*; missing or bad values keep the defaults.
+load_config() {
+  CFG_UNIT=m CFG_THEME=$DEFAULT_THEME CFG_LAST=0
+  [[ -r $CONFIG ]] || return 0
+  local key value
+  while IFS='=' read -r key value; do
+    case $key in
+      unit)  [[ $value == [smh] ]] && CFG_UNIT=$value ;;
+      theme) is_theme $value && CFG_THEME=$value ;;
+      last)  [[ $value == <1-> ]] && (( ${#value} <= 10 )) && CFG_LAST=$value ;;
+    esac
+  done < $CONFIG
+  return 0
+}
+
+# save_config — write CFG_* to $CONFIG. Never fails: an unwritable config must not stop the timer.
+save_config() {
+  { mkdir -p ${CONFIG:h} && print -l "unit=$CFG_UNIT" "theme=$CFG_THEME" "last=$CFG_LAST" > $CONFIG } 2>/dev/null
+  return 0
 }
 
 # ask_duration — prompt for unit then amount; prints total seconds.

@@ -2,6 +2,7 @@
 # Plain-zsh tests for sleeptimer. Run: zsh tests/test_sleeptimer.zsh
 
 SLEEPTIMER_BAR_WIDTH=10
+export SLEEPTIMER_CONFIG=$(mktemp -d)/sleeptimer/config  # never touch the real ~/.config
 SCRIPT="${0:A:h}/../sleeptimer"
 source $SCRIPT
 apply_theme classic  # plain "#"/"-" and no color codes, so expected strings stay readable
@@ -106,6 +107,19 @@ assert_eq "bar full"     "[##########] 100%  00:00 left"  "$(render_bar 60 60)"
 assert_eq "bar overflow" "[##########] 100%  00:00 left"  "$(render_bar 99 60)"
 assert_eq "bar width arg" "[##--]  50%  00:30 left"       "$(render_bar 30 60 4)"
 
+# config: defaults, round trip, corrupt values, unwritable path
+rm -f $SLEEPTIMER_CONFIG
+load_config
+assert_eq "config defaults" "m night 0" "$CFG_UNIT $CFG_THEME $CFG_LAST"
+CFG_UNIT=h CFG_THEME=ocean CFG_LAST=4500 save_config
+load_config
+assert_eq "config round trip" "h ocean 4500" "$CFG_UNIT $CFG_THEME $CFG_LAST"
+print -l 'unit=zz' 'theme=*' 'last=abc' 'junk line' > $SLEEPTIMER_CONFIG
+load_config
+assert_eq "config ignores bad values" "m night 0" "$CFG_UNIT $CFG_THEME $CFG_LAST"
+assert_eq "config unwritable ok" "0" "$( CONFIG=/nonexistent/dir/config; save_config; print $? )"
+rm -f $SLEEPTIMER_CONFIG; load_config
+
 # ask_duration: re-prompts on bad unit and bad amount; accepts word units
 assert_eq "ask_duration retries" "180" \
   "$(print -l x Minutes abc 0 3 | ask_duration 2>/dev/null)"
@@ -144,6 +158,7 @@ e2e=$(print -l s 1 | SLEEPTIMER_DRY_RUN=1 zsh $SCRIPT 2>/dev/null)
 assert_eq "e2e announces" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
 assert_eq "e2e dry-runs"  "yes" "$([[ $e2e == *'DRY RUN: pause + mute + sleep'* ]] && print yes)"
 
+rm -rf ${SLEEPTIMER_CONFIG:h:h}
 print
 (( fails == 0 )) && print "All tests passed" || print "$fails test(s) failed"
 exit $(( fails > 0 ))
