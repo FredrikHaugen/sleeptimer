@@ -30,6 +30,7 @@ assert_fails() {  # assert_fails <name> <cmd...>
 # The fake sudo points the guard's fixed PATH at the fakes. Every call is appended to $FAKE_LOG.
 # STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM); STUB_SLEEPNOW_RC sets
 # "pmset sleepnow"'s; STUB_RUNNING lists the apps the fake pgrep reports as running.
+# STUB_WAKETIME is the epoch second the fake "sysctl -n kern.waketime" reports as the last wake (default 0).
 fake_bin=$(mktemp -d)
 export FAKE_BIN=$fake_bin FAKE_LOG=$fake_bin/calls.log FAKE_STATE=$fake_bin/state FAKE_UID=$UID
 export STUB_SLEEP_DISABLED=0 STUB_SUDO_RC=0 STUB_SUDO_N_RC=0
@@ -58,11 +59,14 @@ print -l '#!/bin/sh' \
   '[ "$1" = "-xqU" ] && [ "$2" = "$FAKE_UID" ] || exit 1  # only this user s apps count' \
   'for app in $STUB_RUNNING; do [ "$app" = "$3" ] && exit 0; done' \
   'exit 1' > $fake_bin/pgrep
+print -l '#!/bin/sh' \
+  '[ "$2" = "kern.waketime" ] && echo "{ sec = ${STUB_WAKETIME:-0}, usec = 0 } Thu Jan  1 00:00:00 1970"' \
+  'exit 0' > $fake_bin/sysctl
 chmod +x $fake_bin/*
 
 # Tests that run the real pause/mute/sleep code use path=($fake_bin /bin). That is only safe while /bin
 # holds none of the real tools, so stop everything if it ever does.
-[[ -z $(path=(/bin); whence -p pmset osascript pgrep caffeinate sudo media-control) ]] ||
+[[ -z $(path=(/bin); whence -p pmset osascript pgrep caffeinate sudo media-control sysctl) ]] ||
   { print "ABORT: /bin has a real pmset/osascript/pgrep/caffeinate/sudo/media-control; tests would touch the system"; exit 1 }
 
 # parse_duration: bare number uses the default unit; inline unit overrides it
@@ -205,8 +209,15 @@ took=$(( EPOCHSECONDS - t0 ))
 assert_eq "countdown ends at 100%" "yes" "$([[ $out == *'100%  00:00 left'* ]] && print yes)"
 assert_eq "countdown starts at 0%" "yes" "$([[ $out == *'[----------]   0%'* ]] && print yes)"
 assert_eq "countdown duration ok"  "yes" "$( (( took >= 1 && took <= 4 )) && print yes )"
-assert_eq "countdown on time ok" "0" "$(SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $?)"
-assert_eq "countdown late fails" "1" "$(GRACE=0 TICK=2.5 SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $?)"
+assert_eq "countdown on time ok" "0" "$( path=($fake_bin /bin); SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+assert_eq "countdown woke after the deadline" "1" \
+  "$( path=($fake_bin /bin); export STUB_WAKETIME=$(( EPOCHSECONDS + 100 )); SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+assert_eq "countdown late but never asleep (Ctrl+Z, clock change) still fires" "0" \
+  "$( path=($fake_bin /bin); TICK=2.5 SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+# woke_after: reads the last wake from the kernel; unknown means "no"
+assert_eq "woke_after later wake"   "yes" "$( path=($fake_bin /bin); export STUB_WAKETIME=200; woke_after 100 && print yes )"
+assert_eq "woke_after earlier wake" "no"  "$( path=($fake_bin /bin); export STUB_WAKETIME=50; woke_after 100 && print yes || print no )"
+assert_eq "woke_after no sysctl"    "no"  "$( path=(/nonexistent); woke_after 100 && print yes || print no )"
 
 # countdown (full-screen mode): enters and leaves the alternate screen, last frame is 100%
 out=$(SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 countdown 1)
@@ -334,9 +345,10 @@ assert_eq "e2e bad argument exit" "1" "$(run banana >/dev/null 2>&1; print $?)"
 assert_eq "e2e bad argument hint" "yes" "$([[ $(run banana 2>&1) == *'sleeptimer -h'* ]] && print yes)"
 assert_eq "e2e too long explains" "yes" "$([[ $(run 25h 2>&1) == *'longer than 24 hours'* ]] && print yes)"
 assert_eq "e2e too long exit 1" "1" "$(run 25h >/dev/null 2>&1; print $?)"
-e2e=$(SLEEPTIMER_TICK=2.5 SLEEPTIMER_GRACE=0 run 1s 2>/dev/null)
+e2e=$(STUB_WAKETIME=$(( EPOCHSECONDS + 100 )) run 1s 2>/dev/null); e2e_rc=$?
 assert_eq "e2e late: explains"     "yes" "$([[ $e2e == *'Time ran out while your Mac was asleep'* ]] && print yes)"
 assert_eq "e2e late: never sleeps" "no"  "$([[ $e2e == *'DRY RUN'* ]] && print yes || print no)"
+assert_eq "e2e late: exit 3"       "3"   "$e2e_rc"
 
 # end-to-end: help and options
 assert_eq "help -h"      "yes" "$([[ $(run -h) == *'Usage:'*'sleeptimer themes'* ]] && print yes)"

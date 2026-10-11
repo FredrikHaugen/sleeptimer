@@ -224,7 +224,6 @@ Environment variables:
 |---|---|---|
 | `SLEEPTIMER_DRY_RUN` | Any non-empty value prints a message instead of pausing, muting and sleeping | off |
 | `SLEEPTIMER_TICK` | Seconds between progress-bar redraws | `1` |
-| `SLEEPTIMER_GRACE` | Seconds late the timer may end before it assumes the Mac was asleep and skips sleeping | `60` |
 | `SLEEPTIMER_PERMISSION_SECS` | How long the start-of-timer query to Music/Spotify may wait for the permission question to be answered | `60` |
 | `SLEEPTIMER_BAR_WIDTH` | Width of the one-line bar (used when output isn't a terminal) | `30` |
 | `SLEEPTIMER_CONFIG` | Where settings (last unit, last time, theme) are saved | `~/.config/sleeptimer/config` |

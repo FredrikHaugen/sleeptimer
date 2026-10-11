@@ -46,7 +46,6 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 | `SLEEPTIMER_TUI` | `1`/`0` forces full-screen or one-line mode |
 | `SLEEPTIMER_COLS` / `SLEEPTIMER_ROWS` | Fake terminal size |
 | `SLEEPTIMER_TICK` | Seconds between redraws |
-| `SLEEPTIMER_GRACE` | Seconds late before `countdown` returns 1 (Mac slept through the deadline) |
 | `SLEEPTIMER_PERMISSION_SECS` | Time limit for the background permission query `ask_media_permission` starts |
 | `SLEEPTIMER_BAR_WIDTH` | One-line bar width |
 
@@ -58,6 +57,7 @@ Fake-command env for YOLO tests:
 - `STUB_SUDO_N_RC`: non-zero fails only the background `sudo -n` guard.
 - `STUB_OSASCRIPT_RC` / `STUB_OSASCRIPT_HANG=1` (`=2`: hang and ignore TERM): the fake `osascript`'s exit code, or make it hang.
 - `STUB_SLEEPNOW_RC`: the fake `pmset sleepnow`'s exit code.
+- `STUB_WAKETIME`: the epoch second the fake `sysctl -n kern.waketime` reports as the last wake. `countdown` returns 1 (and `main` exits 3 without sleeping) when the Mac woke after the deadline.
 - `STUB_RUNNING`: space-separated app names the fake `pgrep` reports as running. It only answers `pgrep -xqU $FAKE_UID <app>` (this user's apps, via `app_running`).
 
 Tests that call the real `pause_media`/`go_to_sleep`/`ask_media_permission` code run it with `path=($fake_bin /bin)`. A tripwire at the top of the test file aborts the suite if `/bin` ever contains a real `pmset`/`osascript`/`pgrep`/`caffeinate`/`sudo`/`media-control`.

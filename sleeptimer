@@ -9,7 +9,6 @@ zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
 BAR_WIDTH=${SLEEPTIMER_BAR_WIDTH:-30}
 TICK=${SLEEPTIMER_TICK:-1}
 MAX_SECS=86400  # 24 hours: guards against "45" meaning 45 hours when the remembered unit is h
-GRACE=${SLEEPTIMER_GRACE:-60}  # seconds late before we assume the Mac slept through the end of the timer
 CONFIG=${SLEEPTIMER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleeptimer/config}
 
 typeset -A UNIT_SECS=(s 1 m 60 h 3600)
@@ -317,8 +316,16 @@ draw_screen() {
   draw_frame "$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)"
 }
 
-# countdown <total> — redraw until total seconds of wall-clock time pass. Returns 1 if it ended more than
-# GRACE seconds late: the Mac was asleep (lid closed) when time ran out, so sleeping now would be wrong.
+# woke_after <epoch> — true if the Mac last woke from sleep after <epoch> (kern.waketime); false if unknown.
+woke_after() {
+  local line
+  line=$(sysctl -n kern.waketime 2>/dev/null) || return 1
+  [[ $line =~ 'sec = ([0-9]+)' ]] && (( match[1] > $1 ))
+}
+
+# countdown <total> — redraw until total seconds of wall-clock time pass. Returns 1 if the Mac woke from
+# sleep after the deadline: it was asleep (lid closed) when time ran out, so sleeping now would be wrong.
+# Being late for any other reason (Ctrl+Z, a clock change) doesn't count.
 countdown() {
   local total=$1 start=$EPOCHSECONDS elapsed=0
   local end=$(( start + total ))
@@ -339,7 +346,7 @@ countdown() {
     done
     printf '\r%s\e[K\n' "$(render_bar $total $total)"
   fi
-  (( elapsed - total <= GRACE ))
+  ! woke_after $end
 }
 
 # sleep_disabled — prints 1 if sleep is turned off system-wide (pmset disablesleep), else 0.
@@ -606,7 +613,7 @@ main() {
   fi
   if ! countdown $secs; then
     print -r -- "Time ran out while your Mac was asleep, so it won't go to sleep now."
-    return 0
+    return 3
   fi
   go_to_sleep
 }
