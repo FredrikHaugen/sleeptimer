@@ -273,6 +273,24 @@ assert_eq "yolo_guard command" \
   "trap '' INT HUP TERM; pmset -a disablesleep 1; while kill -0 42 2>/dev/null; do sleep 1; done; pmset -a disablesleep 0" \
   "$(yolo_guard 42 0)"
 
+# render_yolo: big "time awake", lid status, centered, never wider than the terminal
+yolo_ok() {  # yolo_ok <cols> <rows> — prints "<lines<=rows> <widest<=cols>" as 1/0
+  local out=$(render_yolo 65 $1 $2 1) l w=0
+  for l in "${(@f)out}"; do (( $#l > w )) && w=$#l; done
+  print "$(( ${#${(@f)out}} <= $2 )) $(( w <= $1 ))"
+}
+assert_eq "yolo frame 60x20 fits"  "1 1" "$(yolo_ok 60 20)"
+assert_eq "yolo frame 200x50 fits" "1 1" "$(yolo_ok 200 50)"
+assert_eq "yolo frame 30x8 fits"   "1 1" "$(yolo_ok 30 8)"
+yframe=$(render_yolo 65 60 20 1)
+assert_eq "yolo shows time awake" "yes" "$([[ $yframe == *'YOLO  ·  awake for 01:05'* ]] && print yes)"
+assert_eq "yolo shows big clock"  "yes" "$([[ $yframe == *'######  ######'* ]] && print yes)"
+assert_eq "yolo lid blocked text" "yes" "$([[ $yframe == *"Closing the lid won't put it to sleep"* ]] && print yes)"
+assert_eq "yolo lid open text"    "yes" \
+  "$([[ $(render_yolo 65 60 20 0) == *'Closing the lid WILL still put it to sleep'* ]] && print yes)"
+assert_eq "yolo centered" "yes" "$([[ $yframe == $'\n'* ]] && print yes)"
+assert_eq "yolo tiny fallback" "awake 01:05" "$(render_yolo 65 20 5 1)"
+
 # normal timer warns when sleep is turned off system-wide
 assert_eq "timer warns if sleep off" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 run 1s 2>&1) == *'Heads up: sleep is turned off'*'sleeptimer yolo off'* ]] && print yes)"
 assert_eq "timer quiet if sleep on"  "no"  "$([[ $(run 1s 2>&1) == *'Heads up'* ]] && print yes || print no)"

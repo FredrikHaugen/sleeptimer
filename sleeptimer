@@ -199,6 +199,40 @@ render_screen() {
   print -rn -- "${(pj:\n:)lines}"
 }
 
+# render_yolo <awake-secs> <cols> <rows> <lid-blocked 0|1> — YOLO frame: big "time awake", centered.
+# At most <rows> lines, none wider than <cols>. Below 30x8 it falls back to one short line.
+render_yolo() {
+  local secs=$1 cols=$2 rows=$3 lid=$4
+  local clock=$(fmt_time $secs)
+  if (( cols < 30 || rows < 8 )); then
+    local short="awake $clock"
+    print -rn -- ${short[1,cols]}
+    return
+  fi
+  local bw=$(big_width $clock) scale=0 s line i
+  local -a info=(
+    "YOLO  ·  awake for $clock"
+    "${${(M)lid:#1}:+Closing the lid won't put it to sleep}${${lid:#1}:+Closing the lid WILL still put it to sleep}"
+    "Ctrl+C to let your Mac sleep again"
+  ) tint=("$C_ACCENT" "" "$C_DIM") lines=()
+  # Biggest clock that fits: 5s rows + 1 gap + 3 info lines.
+  for s in 4 3 2 1; do
+    (( bw * 2 * s <= cols - 4 && 5 * s + 4 <= rows )) && { scale=$s; break }
+  done
+  local height=$(( scale ? 5 * scale + 4 : 3 ))
+  repeat $(( (rows - height) / 2 )) lines+=("")
+  if (( scale )); then
+    local pad=${(l:$(( (cols - bw * 2 * scale) / 2 )):: :)}
+    for line in "${(@f)$(render_big $clock $scale)}"; do lines+=("$pad$C_ACCENT$line$C_RESET"); done
+    lines+=("")
+  fi
+  for i in {1..$#info}; do
+    line=${info[i][1,cols]}
+    lines+=("${(l:$(( (cols - $#line) / 2 )):: :)}$tint[i]$line${tint[i]:+$C_RESET}")
+  done
+  print -rn -- "${(pj:\n:)lines}"
+}
+
 # load_config — read unit/theme/last from $CONFIG into CFG_*; missing or bad values keep the defaults.
 load_config() {
   CFG_UNIT=m CFG_THEME=$DEFAULT_THEME CFG_LAST=0
@@ -269,12 +303,16 @@ term_size() {
 screen_enter() { IN_TUI=1; printf '\e[?1049h\e[?25l' }
 screen_leave() { (( IN_TUI )) && printf '\e[?25h\e[?1049l'; IN_TUI=0 }
 
-# draw_screen <elapsed> <total> <end-epoch> — redraw the full-screen frame in place.
+# draw_frame <frame> — paint a full-screen frame in place, clearing what is left of the previous one.
+draw_frame() {
+  local nl=$'\e[K\n'  # a $'...' replacement inside "${//}" would stay literal
+  printf '\e[H%s\e[J' "${1//$'\n'/$nl}"
+}
+
+# draw_screen <elapsed> <total> <end-epoch> — redraw the countdown frame in place.
 draw_screen() {
   local -a size=($(term_size))
-  local frame=$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)
-  local nl=$'\e[K\n'  # a $'...' replacement inside "${//}" would stay literal
-  printf '\e[H%s\e[J' "${frame//$'\n'/$nl}"
+  draw_frame "$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)"
 }
 
 # countdown <total> — redraw until total seconds of wall-clock time pass.
