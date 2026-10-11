@@ -28,7 +28,7 @@ assert_fails() {  # assert_fails <name> <cmd...>
 # The fake pmset remembers "disablesleep N" in $FAKE_STATE; until then "pmset -g" reports $STUB_SLEEP_DISABLED.
 # STUB_SUDO_RC != 0 makes every sudo call fail; STUB_SUDO_N_RC != 0 fails only "sudo -n" (background guard).
 # The fake sudo points the guard's fixed PATH at the fakes. Every call is appended to $FAKE_LOG.
-# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM; the mute line never hangs); STUB_SLEEPNOW_RC sets
+# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM; the mute line hangs only with STUB_MUTE_HANG=1); STUB_SLEEPNOW_RC sets
 # "pmset sleepnow"'s; STUB_RUNNING lists the apps the fake pgrep reports as running.
 # STUB_PMSET_STUCK=1 makes the fake pmset ignore "disablesleep 0" (a guard that never restores).
 # STUB_WAKETIME is the epoch second the fake "sysctl -n kern.waketime" reports as the last wake (default 0).
@@ -56,7 +56,7 @@ print -l '#!/bin/sh' \
   'while kill -0 "$3" 2>/dev/null; do sleep 0.2; done' > $fake_bin/caffeinate
 print -l '#!/bin/sh' \
   'echo "osascript $*" >> "$FAKE_LOG"' \
-  'case "$2" in *"set volume"*) ;; *) [ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30;; esac' \
+  'case "$2" in *"set volume"*) [ "$STUB_MUTE_HANG" = 1 ] && exec sleep 30;; *) [ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30;; esac' \
   'if [ "$STUB_OSASCRIPT_HANG" = 2 ]; then trap "" TERM; sleep 30; fi' \
   'exit "$STUB_OSASCRIPT_RC"' > $fake_bin/osascript
 print -l '#!/bin/sh' \
@@ -252,8 +252,11 @@ assert_eq "finish_within kills hung jobs together" "143 143" \
   "$(sleep 10 & a=$!; sleep 10 & b=$!; finish_within 1 $a $b; wait $a; x=$?; wait $b; print "$x $?")"
 assert_eq "finish_within shares one limit" "yes" "$( (( EPOCHSECONDS - t0 <= 3 )) && print yes )"
 t0=$EPOCHSECONDS
-assert_eq "finish_within kills a job that ignores TERM" "137" \
-  "$(sh -c 'trap "" TERM; sleep 8' >/dev/null & a=$!; finish_within 1 $a; wait $a; print $?)"
+assert_eq "finish_within reaps what it killed" "" \
+  "$(sleep 10 & a=$!; finish_within 1 $a; print ${(k)jobstates})"
+assert_eq "finish_within kills a job that ignores TERM" "timed out, gone" \
+  "$(sh -c 'trap "" TERM; sleep 8' >/dev/null & a=$!; finish_within 1 $a
+     (( ${TIMED_OUT[(Ie)$a]} )) && print -n 'timed out'; kill -0 $a 2>/dev/null || print ', gone')"
 assert_eq "finish_within ignoring TERM is still quick" "yes" "$( (( EPOCHSECONDS - t0 <= 4 )) && print yes )"
 
 # pause_media: "Now Playing" via media-control, plus Music/Spotify directly when they're running; never fails.
@@ -285,7 +288,7 @@ t0=$EPOCHSECONDS
 assert_eq "pause_media gives up on hung apps within ~4 s total" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
 pm_hung=$( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2; pause_media 2>&1 >/dev/null )
 assert_eq "pause_media says when an app hung" "yes" \
-  "$([[ $pm_hung == *"Music didn't answer in time"* && $pm_hung != *Automation* ]] && print yes)"
+  "$([[ $pm_hung == *"Music didn't answer in time"*'click OK'* ]] && print yes)"
 pm_err=$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_RC=1; pause_media 2>&1 >/dev/null )
 assert_eq "pause_media says when an app didn't pause" "yes" \
   "$([[ $pm_err == *"Couldn't pause Music"*'Privacy & Security → Automation'* ]] && print yes)"
@@ -331,6 +334,14 @@ gts_out=$(gts STUB_SLEEPNOW_RC=1 2>&1); gts_rc=$?
 assert_eq "sleepnow fails: exit 1" "1" "$gts_rc"
 assert_eq "sleepnow fails: says so" "yes" \
   "$([[ $gts_out == *"Couldn't mute the sound and put the Mac to sleep"* ]] && print yes)"
+t0=$EPOCHSECONDS
+: > $FAKE_LOG
+gts_out=$(gts STUB_MUTE_HANG=1 MUTE_SECS=1 2>&1); gts_rc=$?
+assert_eq "mute hangs: watchdog ends it" "yes" "$( (( EPOCHSECONDS - t0 <= 4 )) && print yes )"
+assert_eq "mute hangs: exit 1" "1" "$gts_rc"
+assert_eq "mute hangs: says so" "yes" \
+  "$([[ $gts_out == *"Couldn't mute the sound and put the Mac to sleep"* ]] && print yes)"
+assert_eq "mute hangs: no sleepnow" "no" "$([[ $(<$FAKE_LOG) == *sleepnow* ]] && print yes || print no)"
 gts_out=$(gts STUB_SLEEP_DISABLED=1 2>&1); gts_rc=$?
 assert_eq "sleep blocked: exit 1" "1" "$gts_rc"
 assert_eq "sleep blocked: says how to fix" "yes" \

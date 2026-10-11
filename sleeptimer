@@ -2,6 +2,7 @@
 # sleeptimer — count down with a progress bar, then pause media, mute and put the Mac to sleep.
 
 zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
+zmodload zsh/system    # provides $sysparams (a subshell's own pid and parent pid)
 
 # Bar and digit characters are multibyte; count widths in characters, not bytes.
 [[ ${LC_ALL:-${LC_CTYPE:-$LANG}} == *[Uu][Tt][Ff](-|)8* ]] || LC_ALL=en_US.UTF-8
@@ -379,6 +380,7 @@ yolo_guard() {
 }
 
 MEDIA_APPS=(Music Spotify)  # paused directly with AppleScript when they're open, media-control or not
+MUTE_SECS=${SLEEPTIMER_MUTE_SECS:-10}  # the mute + sleep line is ended if it hangs this long
 
 # app_running <name> — true if this user has <name> open (another logged-in user's copy doesn't count).
 app_running() {
@@ -411,7 +413,20 @@ finish_within() {
     sleep 0.2
   done
   kill -9 $left 2>/dev/null
+  wait $left 2>/dev/null  # reap them, so they leave the job table
   return 0
+}
+
+# kill_children_after <seconds> <pid> — run as a tethered job: after <seconds>, KILL every process <pid>
+# started, except this watchdog's own job. Guards the mute + sleep line, which can't be wrapped itself.
+kill_children_after() {
+  sleep $1
+  local line
+  local -a f
+  for line in ${(f)"$(ps -A -o pid= -o ppid=)"}; do
+    f=(${=line})
+    (( f[2] == $2 && f[1] != sysparams[ppid] )) && kill -9 $f[1] 2>/dev/null
+  done
 }
 
 # tethered <cmd...> — start <cmd> as a background job tied to this script, like caffeinate -w: it is
@@ -460,7 +475,7 @@ pause_media() {
   for app in $MEDIA_APPS; do
     [[ -n $pids[$app] ]] || continue
     if (( ${TIMED_OUT[(Ie)$pids[$app]]} )); then
-      print -u2 "$app didn't answer in time, so it may still be playing."
+      print -u2 "$app didn't answer in time, so it may still be playing. If macOS asked whether Terminal may control it, click OK next time."
     elif ! wait $pids[$app] 2>/dev/null; then
       print -u2 "Couldn't pause $app. If Terminal isn't allowed to control it: System Settings → Privacy & Security → Automation."
     fi
@@ -490,7 +505,12 @@ go_to_sleep() {
     return
   fi
   pause_media
-  if ! { osascript -e "set volume with output muted" && pmset sleepnow }; then
+  local watchdog ok=1
+  tethered kill_children_after $MUTE_SECS $sysparams[pid]
+  watchdog=$!
+  osascript -e "set volume with output muted" && pmset sleepnow || ok=0
+  kill $watchdog 2>/dev/null; wait $watchdog 2>/dev/null
+  if (( ! ok )); then
     print -u2 "Couldn't mute the sound and put the Mac to sleep."
     return 1
   fi

@@ -22,7 +22,7 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 ## Architecture
 
 - **Sourceable script.** The last line, `[[ $ZSH_EVAL_CONTEXT == toplevel ]] && main "$@"`, runs `main` only when the script is executed. The test file `source`s the script and calls functions directly. It also runs the script as a subprocess (`zsh $SCRIPT …`) for end-to-end checks.
-- **Pure functions vs I/O.** Parsing and formatting are pure and print to stdout: `parse_duration`, `fmt_dec`, `describe_duration`, `fmt_time`, `fmt_clock`, `render_bar`, `render_big` and `render_screen`. I/O is kept to thin wrappers: `ask_duration`, `load_config`/`save_config`, `tethered`, `finish_within`, `kill_jobs`, `pause_media`, `ask_media_permission`, `draw_screen`, `countdown`, `go_to_sleep` and `main`. Put new logic in a pure function so it can be tested.
+- **Pure functions vs I/O.** Parsing and formatting are pure and print to stdout: `parse_duration`, `fmt_dec`, `describe_duration`, `fmt_time`, `fmt_clock`, `render_bar`, `render_big` and `render_screen`. I/O is kept to thin wrappers: `ask_duration`, `load_config`/`save_config`, `tethered`, `finish_within`, `kill_children_after`, `kill_jobs`, `pause_media`, `ask_media_permission`, `draw_screen`, `countdown`, `go_to_sleep` and `main`. Put new logic in a pure function so it can be tested.
 - **Durations** travel as the string `"<seconds> <unit>"`, where the unit is `s|m|h`. `parse_duration` returns 1 for invalid input and 2 for over `MAX_SECS` (24 h). A bare number uses the remembered unit `CFG_UNIT`.
 - **Settings** live in a `key=value` file (`unit`, `theme`, `last`), read into the `CFG_*` globals. Bad values fall back to defaults, and `save_config` never fails.
 - **Themes** are `THEMES[name]="fill|empty|fill-color|empty-color|accent|description"`, with order and numbering from `THEME_NAMES`. `apply_theme` sets the `FILL`/`EMPTY`/`C_*` globals that all the rendering functions read. `NO_COLOR` disables colour.
@@ -49,6 +49,7 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 | `SLEEPTIMER_COLS` / `SLEEPTIMER_ROWS` | Fake terminal size |
 | `SLEEPTIMER_TICK` | Seconds between redraws |
 | `SLEEPTIMER_GRACE` | Seconds late before `countdown` returns 2 (ended late without sleeping: Ctrl+Z, clock change) |
+| `SLEEPTIMER_MUTE_SECS` | Watchdog limit for the mute + sleep line (`kill_children_after`) |
 | `SLEEPTIMER_BAR_WIDTH` | One-line bar width |
 
 Tests call `apply_theme classic` so expected strings are plain `#`/`-` with no escape codes.
@@ -59,6 +60,7 @@ Fake-command env for YOLO tests:
 - `STUB_SUDO_N_RC`: non-zero fails only the background `sudo -n` guard.
 - `STUB_OSASCRIPT_RC` / `STUB_OSASCRIPT_HANG=1` (`=2`: hang and ignore TERM): the fake `osascript`'s exit code, or make it hang.
 - `STUB_SLEEPNOW_RC`: the fake `pmset sleepnow`'s exit code.
+- `STUB_MUTE_HANG=1`: the fake `osascript` hangs on the mute line only. Tests set the shell variable `MUTE_SECS=1` (the env var is read when the test file sources the script).
 - `STUB_PMSET_STUCK=1`: the fake `pmset` ignores `disablesleep 0` (a guard that never restores). The fake `caffeinate` stays alive while the `-w` pid lives, and logs `caffeinate pid N` and `caffeinate stopped`.
 - `STUB_WAKETIME`: the epoch second the fake `sysctl -n kern.waketime` reports as the last wake. `countdown` returns 1 when the Mac woke after the deadline, or 2 when it ended more than `GRACE` seconds late; `main` then exits 3 without sleeping.
 - `STUB_RUNNING`: space-separated app names the fake `pgrep` reports as running. It only answers `pgrep -xqU $FAKE_UID <app>` (this user's apps, via `app_running`).

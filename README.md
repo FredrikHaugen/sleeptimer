@@ -203,7 +203,7 @@ click the speaker icon at the top of the screen.
 | Colors look strange | Try `sleeptimer themes classic`. |
 | `Heads up: sleep is turned off system-wide` | Something (YOLO, or another keep-awake app) switched sleep off, so the timer may not be able to put the Mac to sleep. Type `sleeptimer yolo off` to switch it back on. |
 | `Sleep is turned off system-wide, so your Mac may not have gone to sleep` | Same cause as above: something switched sleep off while the timer ran. Type `sleeptimer yolo off`. |
-| `Couldn't mute the sound and put the Mac to sleep.` | macOS refused. Put the Mac to sleep from the Apple menu → **Sleep** this time. If it keeps happening, restart the Mac. |
+| `Couldn't mute the sound and put the Mac to sleep.` | macOS refused, or didn't answer within 10 seconds. Put the Mac to sleep from the Apple menu → **Sleep** this time. If it keeps happening, restart the Mac. |
 | The timer stopped by itself | The Terminal window was probably closed. Start it again and leave the window open. |
 | `Time ran out while your Mac was asleep, so it won't go to sleep now.` | The Mac went to sleep on its own (for example, you closed the lid) before the timer ended. sleeptimer doesn't mute it or put it back to sleep when you wake it. Nothing to fix. |
 | `The timer ended late, so it won't put your Mac to sleep now.` | The timer was paused (for example with Control + Z) or the clock changed, so it ended more than a minute late. It doesn't mute or sleep the Mac by surprise. Start it again if you still want it. |
@@ -234,6 +234,7 @@ Environment variables:
 | `SLEEPTIMER_DRY_RUN` | Any non-empty value prints a message instead of pausing, muting and sleeping | off |
 | `SLEEPTIMER_TICK` | Seconds between progress-bar redraws | `1` |
 | `SLEEPTIMER_GRACE` | Seconds late the timer may end (for example after Control + Z) before it gives up instead of sleeping | `60` |
+| `SLEEPTIMER_MUTE_SECS` | Seconds the final mute + sleep step may hang before it is stopped and reported | `10` |
 | `SLEEPTIMER_BAR_WIDTH` | Width of the one-line bar (used when output isn't a terminal) | `30` |
 | `SLEEPTIMER_CONFIG` | Where settings (last unit, last time, theme) are saved | `~/.config/sleeptimer/config` |
 | `SLEEPTIMER_TUI` | `1` forces the full-screen view, `0` forces the one-line bar | full screen when output is a terminal |
