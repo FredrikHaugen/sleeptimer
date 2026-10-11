@@ -28,10 +28,10 @@ assert_fails() {  # assert_fails <name> <cmd...>
 # The fake pmset remembers "disablesleep N" in $FAKE_STATE; until then "pmset -g" reports $STUB_SLEEP_DISABLED.
 # STUB_SUDO_RC != 0 makes every sudo call fail; STUB_SUDO_N_RC != 0 fails only "sudo -n" (background guard).
 # The fake sudo points the guard's fixed PATH at the fakes. Every call is appended to $FAKE_LOG.
-# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang; STUB_SLEEPNOW_RC sets
+# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM); STUB_SLEEPNOW_RC sets
 # "pmset sleepnow"'s; STUB_RUNNING lists the apps the fake pgrep reports as running.
 fake_bin=$(mktemp -d)
-export FAKE_BIN=$fake_bin FAKE_LOG=$fake_bin/calls.log FAKE_STATE=$fake_bin/state
+export FAKE_BIN=$fake_bin FAKE_LOG=$fake_bin/calls.log FAKE_STATE=$fake_bin/state FAKE_UID=$UID
 export STUB_SLEEP_DISABLED=0 STUB_SUDO_RC=0 STUB_SUDO_N_RC=0
 export STUB_OSASCRIPT_RC=0 STUB_OSASCRIPT_HANG=0 STUB_SLEEPNOW_RC=0 STUB_RUNNING=
 print -l '#!/bin/sh' \
@@ -52,9 +52,11 @@ print -l '#!/bin/sh' 'echo "caffeinate $*" >> "$FAKE_LOG"' > $fake_bin/caffeinat
 print -l '#!/bin/sh' \
   'echo "osascript $*" >> "$FAKE_LOG"' \
   '[ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30' \
+  'if [ "$STUB_OSASCRIPT_HANG" = 2 ]; then trap "" TERM; sleep 30; fi' \
   'exit "$STUB_OSASCRIPT_RC"' > $fake_bin/osascript
 print -l '#!/bin/sh' \
-  'for app in $STUB_RUNNING; do [ "$app" = "$2" ] && exit 0; done' \
+  '[ "$1" = "-xqU" ] && [ "$2" = "$FAKE_UID" ] || exit 1  # only this user s apps count' \
+  'for app in $STUB_RUNNING; do [ "$app" = "$3" ] && exit 0; done' \
   'exit 1' > $fake_bin/pgrep
 chmod +x $fake_bin/*
 
@@ -231,6 +233,10 @@ assert_eq "with_timeout passes status" "0 1 7" \
 t0=$EPOCHSECONDS
 assert_eq "with_timeout kills hung command" "124" "$(with_timeout 1 sleep 10; print $?)"
 assert_eq "with_timeout is quick" "yes" "$( (( EPOCHSECONDS - t0 <= 3 )) && print yes )"
+t0=$EPOCHSECONDS
+assert_eq "with_timeout kills a command that ignores TERM" "124" \
+  "$(with_timeout 1 sh -c 'trap "" TERM; sleep 8' >/dev/null; print $?)"
+assert_eq "with_timeout ignoring TERM is still quick" "yes" "$( (( EPOCHSECONDS - t0 <= 4 )) && print yes )"
 
 # pause_media: "Now Playing" via media-control, plus Music/Spotify directly when they're running; never fails.
 # path=(... $fake_bin /bin): fake pgrep/osascript only, so the tests never pause or open real apps.
@@ -259,6 +265,9 @@ assert_eq "pause_media both ways" "yes" \
 t0=$EPOCHSECONDS
 ( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1; pause_media 2>/dev/null )
 assert_eq "pause_media gives up on a hung app" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
+pm_err=$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_RC=1; pause_media 2>&1 >/dev/null )
+assert_eq "pause_media says when an app didn't pause" "yes" "$([[ $pm_err == *"Couldn't pause Music"* ]] && print yes)"
+assert_eq "pause_media quiet when all is well" "" "$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music; pause_media 2>&1 )"
 : > $FAKE_LOG
 rm -rf $stub_dir
 
@@ -277,6 +286,10 @@ t0=$EPOCHSECONDS
 ( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1; ask_media_permission )
 assert_eq "permission doesn't wait for an answer" "yes" "$( (( EPOCHSECONDS - t0 <= 1 )) && print yes )"
 sleep 0.5  # let that background fake log its call before the log is cleared below
+t0=$EPOCHSECONDS
+( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2 SLEEPTIMER_PERMISSION_SECS=1; source $SCRIPT; ask_media_permission )
+sleep 3.5
+assert_eq "unanswered permission query is cleaned up" "" "$(pgrep -f "$fake_bin/osascript")"
 : > $FAKE_LOG
 
 # go_to_sleep, the real (non-dry-run) path, with fakes only: path has no real pmset/osascript (see the tripwire)

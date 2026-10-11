@@ -368,9 +368,16 @@ yolo_guard() {
 }
 
 MEDIA_APPS=(Music Spotify)  # paused directly with AppleScript when they're open, media-control or not
+PERMISSION_SECS=${SLEEPTIMER_PERMISSION_SECS:-60}  # how long the start-of-timer permission query may wait
+
+# app_running <name> — true if this user has <name> open (another logged-in user's copy doesn't count).
+app_running() {
+  pgrep -xqU $UID $1 2>/dev/null
+}
 
 # with_timeout <seconds> <cmd...> — run <cmd>, killing it after <seconds>; its exit status, or 124 on timeout.
 # Guards the end of the timer: a hung app, or a permission dialog nobody answers, must not stop the sleep.
+# A command that ignores TERM gets KILL a second later, so the final wait can't hang.
 with_timeout() {
   local secs=$1; shift
   "$@" & local pid=$!
@@ -378,7 +385,9 @@ with_timeout() {
     kill -0 $pid 2>/dev/null || { wait $pid; return }
     sleep 0.2
   done
-  kill $pid 2>/dev/null; wait $pid 2>/dev/null
+  kill $pid 2>/dev/null
+  repeat 5; do kill -0 $pid 2>/dev/null || break; sleep 0.2; done
+  kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
   return 124
 }
 
@@ -393,8 +402,9 @@ pause_media() {
     print -u2 "Tip: brew install media-control to also pause YouTube and other players."
   fi
   for app in $MEDIA_APPS; do
-    pgrep -xq $app 2>/dev/null || continue  # "tell application" would open an app that isn't running
-    with_timeout 3 osascript -e "tell application \"$app\" to pause" >/dev/null 2>&1
+    app_running $app || continue  # "tell application" would open an app that isn't running
+    with_timeout 3 osascript -e "tell application \"$app\" to pause" >/dev/null 2>&1 ||
+      print -u2 "Couldn't pause $app."
   done
   return 0
 }
@@ -406,8 +416,8 @@ ask_media_permission() {
   [[ -n $SLEEPTIMER_DRY_RUN ]] && return 0
   local app
   for app in $MEDIA_APPS; do
-    pgrep -xq $app 2>/dev/null || continue  # "tell application" would open an app that isn't running
-    osascript -e "tell application \"$app\" to get player state" >/dev/null 2>&1 &!
+    app_running $app || continue  # "tell application" would open an app that isn't running
+    ( with_timeout $PERMISSION_SECS osascript -e "tell application \"$app\" to get player state" ) >/dev/null 2>&1 &!
   done
   return 0
 }
