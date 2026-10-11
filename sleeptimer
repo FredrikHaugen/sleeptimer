@@ -555,9 +555,12 @@ yolo_marker() { print -r -- ${CONFIG:h}/yolo }
 yolo_leftover() {
   local -a m
   m=($(<$(yolo_marker))) 2>/dev/null || return 0
-  kill -0 $m[1] 2>/dev/null && return 0  # that YOLO is still running
+  local boot=$(kern_secs kern.boottime)
+  # Same boot and its pid is alive: that YOLO is still running. After a restart the pid may have been
+  # handed to another process, so an earlier boot's marker is always a leftover.
+  [[ $m[3] == $boot ]] && kill -0 $m[1] 2>/dev/null && return 0
   rm -f $(yolo_marker)
-  [[ $m[2] == [01] && $m[3] != $(kern_secs kern.boottime) ]] && print $m[2]
+  [[ $m[2] == [01] && -n $boot && $m[3] != $boot ]] && print $m[2]
 }
 
 # yolo_cmd [off] — keep the Mac awake (lid closed too) until Ctrl+C; "off" turns sleep back on for good.

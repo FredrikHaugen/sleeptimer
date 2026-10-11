@@ -314,7 +314,7 @@ assert_eq "permission doesn't wait for an answer" "yes" "$( (( EPOCHSECONDS - t0
 sleep 0.5  # let that background fake log its call before the log is cleared below
 assert_eq "kill_jobs ends a pending permission query" "" \
   "$( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2; ask_media_permission; sleep 0.3; kill_jobs; sleep 0.3
-      pgrep -f "$fake_bin/osascript" )"
+      /usr/bin/pgrep -f "$fake_bin/osascript" )"  # the real pgrep, read-only: the fake one can't list processes
 : > $FAKE_LOG
 
 # go_to_sleep, the real (non-dry-run) path, with fakes only: path has no real pmset/osascript (see the tripwire)
@@ -574,6 +574,10 @@ yolo_run TERM STUB_SLEEP_DISABLED=1
 assert_eq "yolo leftover: says so"       "yes" "$([[ $yout == *'left sleep turned off'* ]] && print yes)"
 assert_eq "yolo leftover: restores on"   "yes" "$([[ $ylog == *'pmset -a disablesleep 0'* ]] && print yes)"
 assert_eq "yolo leftover: marker gone"   "no"  "$([[ -e $ymark ]] && print yes || print no)"
+# after a restart pids are handed out again: a marker from an earlier boot is a leftover even if its pid is alive
+print "$$ 0 1" > $ymark
+yolo_run TERM STUB_SLEEP_DISABLED=1
+assert_eq "yolo leftover despite a reused pid" "yes" "$([[ $yout == *'left sleep turned off'* ]] && print yes)"
 # ...but a marker from this boot (kill -9: the guard already restored) is not a leftover
 print "999999 0 1000" > $ymark
 yolo_run TERM STUB_SLEEP_DISABLED=1
