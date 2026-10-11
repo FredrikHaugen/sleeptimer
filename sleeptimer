@@ -448,6 +448,14 @@ cancel() {
   exit 130
 }
 
+# hangup — the Terminal window was closed: stop without pausing, muting or sleeping. Nobody can read a
+# message now, so print none, and ignore errors from a terminal that is already gone.
+hangup() {
+  (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
+  { screen_leave } 2>/dev/null
+  exit 129
+}
+
 # yolo_cmd [off] — keep the Mac awake (lid closed too) until Ctrl+C; "off" turns sleep back on for good.
 yolo_cmd() {
   case $1 in
@@ -572,7 +580,8 @@ main() {
     yolo) shift; yolo_cmd "$@"; return ;;
     -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
   esac
-  trap cancel INT TERM HUP
+  trap cancel INT TERM
+  trap hangup HUP
   local parsed secs rc
   if (( $# )); then
     parsed=$(parse_duration "$*" $CFG_UNIT); rc=$?

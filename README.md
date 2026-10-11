@@ -130,6 +130,8 @@ key, not Command.
 
 You'll see `Cancelled — not sleeping.`, and nothing gets paused, muted or put to sleep.
 
+Closing the Terminal window cancels the timer too, the same way.
+
 ---
 
 ## Change the look (themes)

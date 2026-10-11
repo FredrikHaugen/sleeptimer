@@ -371,6 +371,32 @@ assert_eq "cancel message"          "yes" "$([[ $out == *'Cancelled — not slee
 assert_eq "cancel never sleeps"     "no"  "$([[ $out == *'DRY RUN'* ]] && print yes || print no)"
 rm -f $log
 
+# end-to-end: closing the window (HUP) mid-countdown stops quietly, fast, and never sleeps
+log=$(mktemp)
+rm -f $FAKE_STATE
+PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 zsh $SCRIPT 30s >$log 2>&1 &
+pid=$!
+sleep 1.5
+t0=$EPOCHSECONDS
+kill -HUP $pid
+wait $pid
+assert_eq "hangup exit 129"        "129" "$?"
+assert_eq "hangup is quick"        "yes" "$( (( EPOCHSECONDS - t0 <= 2 )) && print yes )"
+out=$(<$log)
+assert_eq "hangup no message"      "no"  "$([[ $out == *Cancelled* ]] && print yes || print no)"
+assert_eq "hangup never sleeps"    "no"  "$([[ $out == *'DRY RUN'* ]] && print yes || print no)"
+assert_eq "hangup restores screen" "yes" "$([[ $out == *$'\e[?25h\e[?1049l'* ]] && print yes)"
+# ...also while the "Heads up" warning pauses for 3 s, before full screen starts
+STUB_SLEEP_DISABLED=1 PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 zsh $SCRIPT 1s >$log 2>&1 &
+pid=$!
+sleep 1
+kill -HUP $pid
+wait $pid
+assert_eq "hangup during heads-up exit 129"   "129" "$?"
+assert_eq "hangup during heads-up never sleeps" "no" "$([[ $(<$log) == *'DRY RUN'* ]] && print yes || print no)"
+rm -f $log
+assert_eq "hangup in subshell silent" "" "$(hangup 2>&1)"
+
 # sleep_disabled reads pmset -g
 assert_eq "sleep_disabled 0" "0" "$( path=($fake_bin $path); STUB_SLEEP_DISABLED=0; sleep_disabled )"
 assert_eq "sleep_disabled 1" "1" "$( path=($fake_bin $path); export STUB_SLEEP_DISABLED=1; sleep_disabled )"

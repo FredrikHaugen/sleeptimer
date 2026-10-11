@@ -29,7 +29,7 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 - **Display modes:**
   - **Full screen** is used when stdout is a TTY. It uses the alternate screen, big digits, and a bar filling all remaining rows. `render_screen` must return exactly `rows` lines, none wider than `cols`; a wrapped line scrolls and garbles the redraw.
   - **One-line `render_bar`** is used otherwise.
-  - `cancel` (trapped on INT/TERM/HUP) must call `screen_leave` before exiting 130.
+  - `cancel` (trapped on INT/TERM) must call `screen_leave` before exiting 130. `hangup` (HUP, i.e. the window was closed) restores the screen with errors ignored, prints nothing and exits 129.
 - **YOLO mode** (`sleeptimer yolo`) is the opposite of the timer. `caffeinate -dims -w $$` blocks normal sleep. Lid-close sleep needs root: a `nohup sudo -n /bin/zsh -f -c "$(yolo_guard …)"` guard sets `pmset -a disablesleep 1` and polls the script's pid, then writes back the *previous* `SleepDisabled` value (`sleep_disabled`).
   - Never replace the polling with a trap: it must survive `kill -9` and closed windows.
   - The root shell runs with `-f` (no user startup files), a fixed `PATH` and detached stdio. Keep it that way, because macOS sudo keeps the user's `HOME` and `PATH`.
