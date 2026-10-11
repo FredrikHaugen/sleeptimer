@@ -9,6 +9,7 @@ zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
 BAR_WIDTH=${SLEEPTIMER_BAR_WIDTH:-30}
 TICK=${SLEEPTIMER_TICK:-1}
 MAX_SECS=86400  # 24 hours: guards against "45" meaning 45 hours when the remembered unit is h
+GRACE=${SLEEPTIMER_GRACE:-60}  # a timer that ends this many seconds late (Ctrl+Z, clock change) gives up
 CONFIG=${SLEEPTIMER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleeptimer/config}
 
 typeset -A UNIT_SECS=(s 1 m 60 h 3600)
@@ -324,8 +325,8 @@ woke_after() {
 }
 
 # countdown <total> — redraw until total seconds of wall-clock time pass. Returns 1 if the Mac woke from
-# sleep after the deadline: it was asleep (lid closed) when time ran out, so sleeping now would be wrong.
-# Being late for any other reason (Ctrl+Z, a clock change) doesn't count.
+# sleep after the deadline (it was asleep when time ran out), 2 if it ended more than GRACE seconds late
+# for another reason (Ctrl+Z, a clock change). Either way, sleeping now would surprise the user.
 countdown() {
   local total=$1 start=$EPOCHSECONDS elapsed=0
   local end=$(( start + total ))
@@ -346,7 +347,9 @@ countdown() {
     done
     printf '\r%s\e[K\n' "$(render_bar $total $total)"
   fi
-  ! woke_after $end
+  woke_after $end && return 1
+  (( elapsed - total > GRACE )) && return 2
+  return 0
 }
 
 # sleep_disabled — prints 1 if sleep is turned off system-wide (pmset disablesleep), else 0.
@@ -408,10 +411,26 @@ finish_within() {
   return 0
 }
 
-# kill_jobs — end every background job this shell still runs (pauses, the permission query).
-# Only live jobs of this shell are touched, so a reused pid can never be hit.
+# tethered <cmd...> — start <cmd> as a background job tied to this script, like caffeinate -w: it is
+# killed within ~0.2 s once the script is gone, even after kill -9 or a crash. TERM to the job ends
+# <cmd> at once. The job exits with <cmd>'s status, so `wait` on it still tells success from failure.
+tethered() {
+  {
+    "$@" &
+    local c=$!
+    trap 'kill -9 $c 2>/dev/null; exit 143' TERM INT HUP QUIT
+    while kill -0 $$ 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 0.2; done
+    kill -9 $c 2>/dev/null
+    wait $c
+  } &
+}
+
+# kill_jobs — end every background job this shell still runs (pauses, the permission query): TERM,
+# then KILL what is left a second later. Only live jobs of this shell are touched, never a reused pid.
 kill_jobs() {
   local j
+  for j in ${(k)jobstates}; do kill %$j 2>/dev/null; done
+  repeat 5; do (( ${#jobstates} )) || return 0; sleep 0.2; done
   for j in ${(k)jobstates}; do kill -9 %$j 2>/dev/null; done
   return 0
 }
@@ -423,21 +442,22 @@ pause_media() {
   local app pid
   local -A pids  # assigning $! straight to an element stores the text "$!", so go through $pid
   if (( $+commands[media-control] )); then
-    media-control pause >/dev/null 2>&1 &
+    tethered media-control pause >/dev/null 2>&1
     pid=$!; pids[media-control]=$pid
   else
     print -u2 "Tip: brew install media-control to also pause YouTube and other players."
   fi
   for app in $MEDIA_APPS; do
     app_running $app || continue
-    osascript -e "$(app_script $app pause)" >/dev/null 2>&1 &
+    tethered osascript -e "$(app_script $app pause)" >/dev/null 2>&1
     pid=$!; pids[$app]=$pid
   done
   (( $#pids )) || return 0
   finish_within 3 $pids
   for app in $MEDIA_APPS; do
     [[ -n $pids[$app] ]] || continue
-    wait $pids[$app] 2>/dev/null || print -u2 "Couldn't pause $app."
+    wait $pids[$app] 2>/dev/null ||
+      print -u2 "Couldn't pause $app. If Terminal isn't allowed to control it: System Settings → Privacy & Security → Automation."
   done
   return 0
 }
@@ -450,7 +470,7 @@ ask_media_permission() {
   local app
   for app in $MEDIA_APPS; do
     app_running $app || continue
-    osascript -e "$(app_script $app 'get player state')" >/dev/null 2>&1 &
+    tethered osascript -e "$(app_script $app 'get player state')" >/dev/null 2>&1
   done
   return 0
 }
@@ -485,10 +505,10 @@ cancel() {
 # hangup — the Terminal window was closed: stop without pausing, muting or sleeping. Nobody can read a
 # message now, so print none, and ignore errors from a terminal that is already gone.
 hangup() {
-  (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
+  (( ZSH_SUBSHELL )) && exit 129  # a $(...) helper caught it; 129 tells the main shell the window closed
   kill_jobs
   { screen_leave } 2>/dev/null
-  exit 129
+  exit 129  # 128 + SIGHUP, the usual status for a hangup
 }
 
 # yolo_cmd [off] — keep the Mac awake (lid closed too) until Ctrl+C; "off" turns sleep back on for good.
@@ -615,7 +635,7 @@ main() {
     yolo) shift; yolo_cmd "$@"; return ;;
     -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
   esac
-  trap cancel INT TERM
+  trap cancel INT TERM QUIT
   trap hangup HUP
   local parsed secs rc
   if (( $# )); then
@@ -628,7 +648,7 @@ main() {
       return 1
     fi
   else
-    parsed=$(ask_duration) || { print; return 1 }
+    parsed=$(ask_duration) || { (( $? == 129 )) && hangup; print; return 1 }
   fi
   secs=${parsed% *} CFG_UNIT=${parsed#* } CFG_LAST=${parsed% *}
   save_config
@@ -640,11 +660,12 @@ main() {
     use_tui && sleep 3  # give the warning time to be read before full screen covers it
   fi
   countdown $secs; local late=$?
+  trap '' INT TERM QUIT HUP  # time is up: finish pause + mute + sleep as one step, never half of it
   kill_jobs  # the permission query has had the whole countdown
-  if (( late )); then
-    print -r -- "Time ran out while your Mac was asleep, so it won't go to sleep now."
-    return 3
-  fi
+  case $late in
+    1) print -r -- "Time ran out while your Mac was asleep, so it won't go to sleep now."; return 3 ;;
+    2) print -r -- "The timer ended late, so it won't put your Mac to sleep now."; return 3 ;;
+  esac
   go_to_sleep
 }
 

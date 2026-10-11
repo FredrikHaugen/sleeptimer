@@ -132,6 +132,9 @@ You'll see `Cancelled — not sleeping.`, and nothing gets paused, muted or put 
 
 Closing the Terminal window cancels the timer too, the same way.
 
+Once the bar reaches 100% it's too late to cancel: it always finishes pausing,
+muting and sleeping, so the Mac is never left muted but awake.
+
 ---
 
 ## Change the look (themes)
@@ -200,9 +203,10 @@ click the speaker icon at the top of the screen.
 | `Couldn't mute the sound and put the Mac to sleep.` | macOS refused. Put the Mac to sleep from the Apple menu → **Sleep** this time. If it keeps happening, restart the Mac. |
 | The timer stopped by itself | The Terminal window was probably closed. Start it again and leave the window open. |
 | `Time ran out while your Mac was asleep, so it won't go to sleep now.` | The Mac went to sleep on its own (for example, you closed the lid) before the timer ended. sleeptimer doesn't mute it or put it back to sleep when you wake it. Nothing to fix. |
+| `The timer ended late, so it won't put your Mac to sleep now.` | The timer was paused (for example with Control + Z) or the clock changed, so it ended more than a minute late. It doesn't mute or sleep the Mac by surprise. Start it again if you still want it. |
 | `Tip: brew install media-control ...` when the timer ends | Only Apple Music and Spotify were paused, because Step 4 was skipped. Do **Step 4** to pause YouTube and other players too. |
 | Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. For Apple Music or Spotify, check **System Settings → Privacy & Security → Automation** and allow Terminal to control them. |
-| `Couldn't pause Music.` (or Spotify) | The app didn't answer within 3 seconds, or Terminal isn't allowed to control it. Check **System Settings → Privacy & Security → Automation**. The Mac still went to sleep. |
+| `Couldn't pause Music. ...` (or Spotify) | The app didn't answer within 3 seconds, or Terminal isn't allowed to control it. Allow Terminal in **System Settings → Privacy & Security → Automation**. The Mac still went to sleep. |
 | I want a different time | Press **Control + C** to cancel, then run `sleeptimer` again. |
 
 ---
@@ -224,6 +228,7 @@ Environment variables:
 |---|---|---|
 | `SLEEPTIMER_DRY_RUN` | Any non-empty value prints a message instead of pausing, muting and sleeping | off |
 | `SLEEPTIMER_TICK` | Seconds between progress-bar redraws | `1` |
+| `SLEEPTIMER_GRACE` | Seconds late the timer may end (for example after Control + Z) before it gives up instead of sleeping | `60` |
 | `SLEEPTIMER_BAR_WIDTH` | Width of the one-line bar (used when output isn't a terminal) | `30` |
 | `SLEEPTIMER_CONFIG` | Where settings (last unit, last time, theme) are saved | `~/.config/sleeptimer/config` |
 | `SLEEPTIMER_TUI` | `1` forces the full-screen view, `0` forces the one-line bar | full screen when output is a terminal |

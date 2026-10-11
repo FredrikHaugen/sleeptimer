@@ -28,7 +28,7 @@ assert_fails() {  # assert_fails <name> <cmd...>
 # The fake pmset remembers "disablesleep N" in $FAKE_STATE; until then "pmset -g" reports $STUB_SLEEP_DISABLED.
 # STUB_SUDO_RC != 0 makes every sudo call fail; STUB_SUDO_N_RC != 0 fails only "sudo -n" (background guard).
 # The fake sudo points the guard's fixed PATH at the fakes. Every call is appended to $FAKE_LOG.
-# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM); STUB_SLEEPNOW_RC sets
+# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM; the mute line never hangs); STUB_SLEEPNOW_RC sets
 # "pmset sleepnow"'s; STUB_RUNNING lists the apps the fake pgrep reports as running.
 # STUB_WAKETIME is the epoch second the fake "sysctl -n kern.waketime" reports as the last wake (default 0).
 fake_bin=$(mktemp -d)
@@ -52,7 +52,7 @@ print -l '#!/bin/sh' \
 print -l '#!/bin/sh' 'echo "caffeinate $*" >> "$FAKE_LOG"' > $fake_bin/caffeinate
 print -l '#!/bin/sh' \
   'echo "osascript $*" >> "$FAKE_LOG"' \
-  '[ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30' \
+  'case "$2" in *"set volume"*) ;; *) [ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30;; esac' \
   'if [ "$STUB_OSASCRIPT_HANG" = 2 ]; then trap "" TERM; sleep 30; fi' \
   'exit "$STUB_OSASCRIPT_RC"' > $fake_bin/osascript
 print -l '#!/bin/sh' \
@@ -212,8 +212,10 @@ assert_eq "countdown duration ok"  "yes" "$( (( took >= 1 && took <= 4 )) && pri
 assert_eq "countdown on time ok" "0" "$( path=($fake_bin /bin); SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
 assert_eq "countdown woke after the deadline" "1" \
   "$( path=($fake_bin /bin); export STUB_WAKETIME=$(( EPOCHSECONDS + 100 )); SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
-assert_eq "countdown late but never asleep (Ctrl+Z, clock change) still fires" "0" \
+assert_eq "countdown a little late still fires" "0" \
   "$( path=($fake_bin /bin); TICK=2.5 SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+assert_eq "countdown far too late (Ctrl+Z, clock change) gives up" "2" \
+  "$( path=($fake_bin /bin); GRACE=0 TICK=2.5 SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
 # woke_after: reads the last wake from the kernel; unknown means "no"
 assert_eq "woke_after later wake"   "yes" "$( path=($fake_bin /bin); export STUB_WAKETIME=200; woke_after 100 && print yes )"
 assert_eq "woke_after earlier wake" "no"  "$( path=($fake_bin /bin); export STUB_WAKETIME=50; woke_after 100 && print yes || print no )"
@@ -278,7 +280,8 @@ t0=$EPOCHSECONDS
 ( path=($stub_dir $fake_bin /bin); export STUB_RUNNING='Music Spotify' STUB_OSASCRIPT_HANG=2; pause_media 2>/dev/null )
 assert_eq "pause_media gives up on hung apps within ~4 s total" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
 pm_err=$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_RC=1; pause_media 2>&1 >/dev/null )
-assert_eq "pause_media says when an app didn't pause" "yes" "$([[ $pm_err == *"Couldn't pause Music"* ]] && print yes)"
+assert_eq "pause_media says when an app didn't pause" "yes" \
+  "$([[ $pm_err == *"Couldn't pause Music"*'Privacy & Security → Automation'* ]] && print yes)"
 assert_eq "pause_media quiet when all is well" "" "$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music; pause_media 2>&1 )"
 : > $FAKE_LOG
 rm -rf $stub_dir
@@ -349,6 +352,10 @@ e2e=$(STUB_WAKETIME=$(( EPOCHSECONDS + 100 )) run 1s 2>/dev/null); e2e_rc=$?
 assert_eq "e2e late: explains"     "yes" "$([[ $e2e == *'Time ran out while your Mac was asleep'* ]] && print yes)"
 assert_eq "e2e late: never sleeps" "no"  "$([[ $e2e == *'DRY RUN'* ]] && print yes || print no)"
 assert_eq "e2e late: exit 3"       "3"   "$e2e_rc"
+e2e=$(SLEEPTIMER_TICK=2.5 SLEEPTIMER_GRACE=0 run 1s 2>/dev/null); e2e_rc=$?
+assert_eq "e2e ended late: explains"     "yes" "$([[ $e2e == *'The timer ended late, so it won'"'"'t put your Mac to sleep now.'* ]] && print yes)"
+assert_eq "e2e ended late: never sleeps" "no"  "$([[ $e2e == *'DRY RUN'* ]] && print yes || print no)"
+assert_eq "e2e ended late: exit 3"       "3"   "$e2e_rc"
 
 # end-to-end: help and options
 assert_eq "help -h"      "yes" "$([[ $(run -h) == *'Usage:'*'sleeptimer themes'* ]] && print yes)"
@@ -411,14 +418,28 @@ assert_eq "hangup in subshell silent" "" "$(hangup 2>&1)"
 
 # end-to-end, not a dry run, but PATH holds only the fakes and /bin (see the tripwire), and it is
 # stopped long before the timer ends: Ctrl+C or a closed window must also end the permission query
-for sig in TERM HUP; do
+for sig in TERM HUP QUIT KILL; do
   env PATH=$fake_bin:/bin STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2 SLEEPTIMER_TUI=0 /bin/zsh $SCRIPT 30s >/dev/null 2>&1 &
   pid=$!
   sleep 1.5
-  kill -$sig $pid; wait $pid
-  sleep 0.5
+  kill -$sig $pid; wait $pid; rc=$?
+  sleep 1.5
   assert_eq "$sig ends the permission query" "" "$(pgrep -f "$fake_bin/osascript")"
+  [[ $sig == QUIT ]] && assert_eq "QUIT cancels like Ctrl+C" "130" "$rc"
 done
+
+# once the timer has run out it finishes pause + mute + sleep even if the window closes or Ctrl+C
+# comes in the middle (the pause step is made slow by a hung app); fakes only, as above
+for sig in HUP INT; do
+  : > $FAKE_LOG; rm -f $FAKE_STATE
+  env PATH=$fake_bin:/bin STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1 SLEEPTIMER_TUI=0 /bin/zsh $SCRIPT 1s >/dev/null 2>&1 &
+  pid=$!
+  sleep 2.5
+  kill -$sig $pid; wait $pid; rc=$?
+  assert_eq "$sig during the final step still sleeps" "yes" "$(grep -qx 'pmset sleepnow' $FAKE_LOG && print yes)"
+  assert_eq "$sig during the final step exit 0" "0" "$rc"
+done
+: > $FAKE_LOG
 
 # sleep_disabled reads pmset -g
 assert_eq "sleep_disabled 0" "0" "$( path=($fake_bin $path); STUB_SLEEP_DISABLED=0; sleep_disabled )"
