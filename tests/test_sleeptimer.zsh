@@ -37,11 +37,53 @@ assert_fails "to_seconds overflow" to_seconds h 99999999999999999999999
 assert_fails "to_seconds 7 digits" to_seconds s 1000000
 assert_eq "to_seconds 6 digits" "999999" "$(to_seconds s 999999)"
 
+# parse_duration: bare number uses the default unit; inline unit overrides it
+assert_eq "parse bare uses default" "2700 m" "$(parse_duration 45 m)"
+assert_eq "parse bare seconds"      "45 s"   "$(parse_duration 45 s)"
+assert_eq "parse inline m"          "2700 m" "$(parse_duration 45m s)"
+assert_eq "parse inline s"          "90 s"   "$(parse_duration 90s h)"
+assert_eq "parse comma decimal"     "4500 h" "$(parse_duration 1,25h m)"
+assert_eq "parse dot decimal"       "5400 h" "$(parse_duration 1.5h m)"
+assert_eq "parse decimal bare"      "75 m"   "$(parse_duration 1,25 m)"
+assert_eq "parse leading dot"       "1800 h" "$(parse_duration .5h m)"
+assert_eq "parse word + space"      "7200 h" "$(parse_duration '2 Hours' m)"
+assert_eq "parse min word"          "1800 m" "$(parse_duration '30 min' s)"
+assert_eq "parse sec word"          "90 s"   "$(parse_duration '90 sec' m)"
+assert_eq "parse rounds .5s up"     "1 s"    "$(parse_duration 0.5s m)"
+assert_eq "parse 24h ok"            "86400 h" "$(parse_duration 24h m)"
+assert_fails "parse zero"           parse_duration 0 m
+assert_fails "parse rounds to 0"    parse_duration 0.4s m
+assert_fails "parse negative"       parse_duration -5 m
+assert_fails "parse letters"        parse_duration abc m
+assert_fails "parse empty"          parse_duration "" m
+assert_fails "parse trailing comma" parse_duration 1, m
+assert_fails "parse two dots"       parse_duration 1.2.3 m
+assert_fails "parse 4 decimals"     parse_duration 0,0001h m
+assert_fails "parse bad unit word"  parse_duration 5x m
+assert_fails "parse over 24h"       parse_duration 25h m
+assert_fails "parse 7 digits"       parse_duration 1000000 s
+
+# fmt_dec / describe_duration
+assert_eq "fmt_dec whole"     "75"   "$(fmt_dec 4500 60)"
+assert_eq "fmt_dec quarter"   "1.25" "$(fmt_dec 4500 3600)"
+assert_eq "fmt_dec one zero"  "1.5"  "$(fmt_dec 5400 3600)"
+assert_eq "fmt_dec rounds"    "1.67" "$(fmt_dec 100 60)"
+assert_eq "describe hour"     "3600 seconds = 60 minutes = 1 hour"      "$(describe_duration 3600)"
+assert_eq "describe 1,25h"    "4500 seconds = 75 minutes = 1.25 hours"  "$(describe_duration 4500)"
+assert_eq "describe 1 minute" "60 seconds = 1 minute = 0.02 hours"      "$(describe_duration 60)"
+assert_eq "describe drops 0"  "10 seconds = 0.17 minutes"               "$(describe_duration 10)"
+assert_eq "describe 1 second" "1 second = 0.02 minutes"                 "$(describe_duration 1)"
+
 # fmt_time
 assert_eq "fmt_time secs"   "00:05"    "$(fmt_time 5)"
 assert_eq "fmt_time mins"   "22:30"    "$(fmt_time 1350)"
 assert_eq "fmt_time hours"  "2:30:00"  "$(fmt_time 9000)"
 assert_eq "fmt_time zero"   "00:00"    "$(fmt_time 0)"
+
+# fmt_clock (UTC so results don't depend on where the tests run)
+assert_eq "clock today"     "01:00"           "$(TZ=UTC fmt_clock 3600 0)"
+assert_eq "clock tomorrow"  "01:00 tomorrow"  "$(TZ=UTC fmt_clock 90000 82800)"
+assert_eq "clock later"     "Sun 11:20"       "$(TZ=UTC fmt_clock 300000 0)"
 
 # render_bar (BAR_WIDTH=10)
 assert_eq "bar empty"    "[----------]   0%  01:00 left"  "$(render_bar 0 60)"
