@@ -149,15 +149,24 @@ assert_eq "screen no clock when short" "no" \
 assert_eq "screen tiny fallback" "50%  00:30 left" "$(render_screen 30 60 20 5 3600 0)"
 assert_eq "screen tiny truncates" "50%  00:" "$(render_screen 30 60 8 5 3600 0)"
 
-# countdown: wall-clock based, so a 0.3s tick still finishes ~on time and ends at 100%
+# countdown (compact mode): wall-clock based, so a 0.3s tick still finishes ~on time and ends at 100%
 TICK=0.3
 t0=$EPOCHSECONDS
-out=$(countdown 2)
+out=$(SLEEPTIMER_TUI=0 countdown 2)
 took=$(( EPOCHSECONDS - t0 ))
 assert_eq "countdown ends at 100%" "yes" "$([[ $out == *'100%  00:00 left'* ]] && print yes)"
 assert_eq "countdown starts at 0%" "yes" "$([[ $out == *'[----------]   0%'* ]] && print yes)"
 assert_eq "countdown duration ok"  "yes" "$( (( took >= 1 && took <= 4 )) && print yes )"
+
+# countdown (full-screen mode): enters and leaves the alternate screen, last frame is 100%
+out=$(SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 countdown 1)
+assert_eq "tui enters alt screen" "yes" "$([[ $out == $'\e[?1049h\e[?25l'* ]] && print yes)"
+assert_eq "tui restores terminal" "yes" "$([[ $out == *$'\e[?25h\e[?1049l' ]] && print yes)"
+assert_eq "tui final frame 100%"  "yes" "$([[ $out == *'100%  ·  00:00 left'* ]] && print yes)"
 TICK=1
+
+# term_size: env override
+assert_eq "term_size override" "100 40" "$(SLEEPTIMER_COLS=100 SLEEPTIMER_ROWS=40 term_size)"
 
 # go_to_sleep dry run never touches the system
 assert_eq "go_to_sleep dry run" "DRY RUN: pause + mute + sleep" "$(SLEEPTIMER_DRY_RUN=1 go_to_sleep)"
@@ -207,6 +216,20 @@ print 2 | run themes >/dev/null
 assert_eq "themes pick by number" "yes" "$( grep -qx 'theme=classic' $SLEEPTIMER_CONFIG && print yes )"
 assert_eq "themes unknown exit 1" "1" "$(run themes nope >/dev/null 2>&1; print $?)"
 assert_eq "themes keeps unit" "yes" "$( grep -qx 'unit=s' $SLEEPTIMER_CONFIG && print yes )"
+
+# end-to-end: cancelling restores the terminal and never sleeps
+log=$(mktemp)
+SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 zsh $SCRIPT 30s >$log 2>&1 &
+pid=$!
+sleep 1.5
+kill -TERM $pid
+wait $pid
+assert_eq "cancel exit 130"         "130" "$?"
+out=$(<$log)
+assert_eq "cancel restores screen"  "yes" "$([[ $out == *$'\e[?25h\e[?1049l'* ]] && print yes)"
+assert_eq "cancel message"          "yes" "$([[ $out == *'Cancelled — not sleeping.'* ]] && print yes)"
+assert_eq "cancel never sleeps"     "no"  "$([[ $out == *'DRY RUN'* ]] && print yes || print no)"
+rm -f $log
 
 rm -rf ${SLEEPTIMER_CONFIG:h:h}
 print

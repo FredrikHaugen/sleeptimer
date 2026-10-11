@@ -241,15 +241,52 @@ ask_duration() {
   done
 }
 
-# countdown <total> — redraw the bar until total seconds of wall-clock time pass.
+# use_tui — full-screen mode when stdout is a terminal; SLEEPTIMER_TUI=1 or 0 forces it on or off.
+use_tui() {
+  [[ -n $SLEEPTIMER_TUI ]] && { [[ $SLEEPTIMER_TUI == 1 ]]; return }
+  [[ -t 1 ]]
+}
+
+# term_size — prints "<cols> <rows>"; SLEEPTIMER_COLS/SLEEPTIMER_ROWS override, 80x24 if unknown.
+term_size() {
+  local rows cols
+  { read rows cols < <(stty size </dev/tty) } 2>/dev/null
+  (( cols > 0 )) || cols=80
+  (( rows > 0 )) || rows=24
+  print "${SLEEPTIMER_COLS:-$cols} ${SLEEPTIMER_ROWS:-$rows}"
+}
+
+screen_enter() { IN_TUI=1; printf '\e[?1049h\e[?25l' }
+screen_leave() { (( IN_TUI )) && printf '\e[?25h\e[?1049l'; IN_TUI=0 }
+
+# draw_screen <elapsed> <total> <end-epoch> — redraw the full-screen frame in place.
+draw_screen() {
+  local -a size=($(term_size))
+  local frame=$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)
+  printf '\e[H%s\e[J' "${frame//$'\n'/$'\e[K\n'}"
+}
+
+# countdown <total> — redraw until total seconds of wall-clock time pass.
 countdown() {
   local total=$1 start=$EPOCHSECONDS elapsed=0
-  while (( elapsed < total )); do
-    printf '\r%s\e[K' "$(render_bar $elapsed $total)"
-    sleep $TICK
-    elapsed=$(( EPOCHSECONDS - start ))
-  done
-  printf '\r%s\e[K\n' "$(render_bar $total $total)"
+  local end=$(( start + total ))
+  if use_tui; then
+    screen_enter
+    while (( elapsed < total )); do
+      draw_screen $elapsed $total $end
+      sleep $TICK
+      elapsed=$(( EPOCHSECONDS - start ))
+    done
+    draw_screen $total $total $end
+    screen_leave
+  else
+    while (( elapsed < total )); do
+      printf '\r%s\e[K' "$(render_bar $elapsed $total)"
+      sleep $TICK
+      elapsed=$(( EPOCHSECONDS - start ))
+    done
+    printf '\r%s\e[K\n' "$(render_bar $total $total)"
+  fi
 }
 
 # pause_media — pause whatever is "Now Playing" (needs `brew install media-control`).
@@ -273,6 +310,7 @@ go_to_sleep() {
 }
 
 cancel() {
+  screen_leave
   print "\nCancelled — not sleeping."
   exit 130
 }
