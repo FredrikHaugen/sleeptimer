@@ -490,7 +490,7 @@ assert_eq "yolo frame heat warning" "yes" "$([[ $yframe == *"Don't put it in a b
 
 # end-to-end: yolo turns sleep off, keeps the Mac awake, and puts everything back however it ends
 ywait=1.5
-yolo_run() {  # yolo_run <signal> [env...] — run "sleeptimer yolo" $ywait s, stop it, let the guard settle; sets yrc, yout, ylog
+yolo_run() {  # yolo_run <signal> [env...] — run "sleeptimer yolo" $ywait s, stop it, let the guard settle; sets yrc, ystate, yout, ylog
   local out=$(mktemp)
   : > $FAKE_LOG; rm -f $FAKE_STATE
   env PATH=$fake_bin:$PATH SLEEPTIMER_TUI=0 SLEEPTIMER_TICK=0.2 "${@:2}" zsh $SCRIPT yolo >$out 2>&1 &
@@ -499,6 +499,7 @@ yolo_run() {  # yolo_run <signal> [env...] — run "sleeptimer yolo" $ywait s, s
   kill -$1 $pid
   wait $pid
   yrc=$?
+  ystate=$(cat $FAKE_STATE 2>/dev/null)  # sleep setting at the moment the script exited
   sleep 2.5
   yout=$(<$out) ylog=$(<$FAKE_LOG)
   rm -f $out
@@ -514,9 +515,19 @@ assert_eq "yolo caffeinates"       "yes" "$([[ $ylog == *'caffeinate -dims -w '[
 assert_eq "yolo warns about heat"  "yes" "$([[ $yout == *"Don't put it in a bag"* ]] && print yes)"
 assert_eq "yolo shows time awake"  "yes" "$([[ $yout == *'Awake for 00:0'* ]] && print yes)"
 assert_eq "yolo stop message"      "yes" "$([[ $yout == *'YOLO off after'*'Your Mac can sleep again.'* ]] && print yes)"
+assert_eq "yolo stop waits for sleep to be back" "0" "$ystate"
+assert_eq "yolo stop ends caffeinate" "yes" "$([[ $ylog == *'caffeinate stopped'* ]] && print yes)"
+cpid=${${(M)${(f)ylog}:#caffeinate pid *}#caffeinate pid }
+assert_eq "yolo guard watches caffeinate" "yes" "$([[ -n $cpid && $ylog == *"while kill -0 $cpid "* ]] && print yes)"
 
 yolo_run KILL
 assert_eq "yolo kill -9 still restores" "yes" "$([[ $ylog == *'disablesleep 1'*'pmset -a disablesleep 0'* ]] && print yes)"
+
+yolo_run TERM STUB_PMSET_STUCK=1
+assert_eq "yolo stuck: tells how to fix" "yes" \
+  "$([[ $yout == *'Sleep is still turned off'*'sleeptimer yolo off'* ]] && print yes)"
+assert_eq "yolo stuck: exit 1" "1" "$yrc"
+rm -f $FAKE_STATE
 
 yolo_run TERM STUB_SLEEP_DISABLED=1
 assert_eq "yolo already off: no sudo"     "no"  "$([[ $ylog == *sudo* ]] && print yes || print no)"
@@ -544,6 +555,9 @@ assert_eq "yolo tui enters alt screen"    "yes" "$([[ $yout == *$'\e[?1049h'*'aw
 assert_eq "yolo tui restores terminal"    "yes" "$([[ $yout == *$'\e[?25h\e[?1049l'*'YOLO off'* ]] && print yes)"
 
 assert_eq "yolo bad arg exit 2" "2" "$(run yolo nope >/dev/null 2>&1; print $?)"
+rm -f $FAKE_STATE
+assert_eq "--yolo off works" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 run --yolo off 2>&1) == *'DRY RUN'* ]] && print yes)"
+assert_eq "help mentions --yolo" "yes" "$([[ $(run -h) == *'sleeptimer --yolo'* ]] && print yes)"
 
 # stop handlers inherited by a $(...) helper must exit quietly and leave the work to the main shell
 assert_eq "yolo_stop in subshell silent" "" "$(YOLO_START=$EPOCHSECONDS; yolo_stop 2>&1)"

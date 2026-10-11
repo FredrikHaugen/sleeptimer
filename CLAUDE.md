@@ -32,10 +32,10 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
   - `cancel` (trapped on INT/TERM/QUIT) must call `kill_jobs` and `screen_leave` before exiting 130. `hangup` (HUP, i.e. the window was closed) calls `kill_jobs`, restores the screen with errors ignored, prints nothing and exits 129. In a `$(…)` helper it exits 129 too, and `main` turns that into `hangup` (HUP at the `How long?` prompt).
   - After `countdown` returns, `main` ignores INT/TERM/QUIT/HUP/TSTP/TTIN/TTOU/PIPE: pause + mute + sleep always finishes as one step. Children inherit the ignored signals; `finish_within` still ends a hung pause with KILL.
   - Background helpers (pauses, the permission query) start through `tethered`, which kills them within ~0.2 s once the script is gone, even after `kill -9`, like `caffeinate -w`. `kill_jobs` ends them on every trapped exit and when the countdown ends.
-- **YOLO mode** (`sleeptimer yolo`) is the opposite of the timer. `caffeinate -dims -w $$` blocks normal sleep. Lid-close sleep needs root: a `nohup sudo -n /bin/zsh -f -c "$(yolo_guard …)"` guard sets `pmset -a disablesleep 1` and polls the script's pid, then writes back the *previous* `SleepDisabled` value (`sleep_disabled`).
+- **YOLO mode** (`sleeptimer yolo`) is the opposite of the timer. `caffeinate -dims -w $$` blocks normal sleep. Lid-close sleep needs root: a `nohup sudo -n /bin/zsh -f -c "$(yolo_guard …)"` guard sets `pmset -a disablesleep 1` and polls the pid of YOLO's `caffeinate` (`$YOLO_CAFF`, which exits with the script), then writes back the *previous* `SleepDisabled` value (`sleep_disabled`). `yolo_stop` kills that caffeinate and waits with `wait_sleep_state 0` before it claims sleep is back.
   - Never replace the polling with a trap: it must survive `kill -9` and closed windows.
   - The root shell runs with `-f` (no user startup files), a fixed `PATH` and detached stdio. Keep it that way, because macOS sudo keeps the user's `HOME` and `PATH`.
-  - `wait_sleep_disabled` checks that the guard really took effect before the screen claims the lid is protected.
+  - `wait_sleep_state 1` checks that the guard really took effect before the screen claims the lid is protected.
   - `SLEEPTIMER_DRY_RUN` also skips `sudo`/`caffeinate` in `yolo` and `yolo off`.
   - Tests use fake `sudo`/`pmset`/`caffeinate` in `$fake_bin` (log: `$FAKE_LOG`; the fake `pmset` remembers its state in `$FAKE_STATE`) and must never call the real ones. Any test that runs the script must put `$fake_bin` first on `PATH`, because the timer reads `pmset -g` too.
 
@@ -59,6 +59,7 @@ Fake-command env for YOLO tests:
 - `STUB_SUDO_N_RC`: non-zero fails only the background `sudo -n` guard.
 - `STUB_OSASCRIPT_RC` / `STUB_OSASCRIPT_HANG=1` (`=2`: hang and ignore TERM): the fake `osascript`'s exit code, or make it hang.
 - `STUB_SLEEPNOW_RC`: the fake `pmset sleepnow`'s exit code.
+- `STUB_PMSET_STUCK=1`: the fake `pmset` ignores `disablesleep 0` (a guard that never restores). The fake `caffeinate` stays alive while the `-w` pid lives, and logs `caffeinate pid N` and `caffeinate stopped`.
 - `STUB_WAKETIME`: the epoch second the fake `sysctl -n kern.waketime` reports as the last wake. `countdown` returns 1 when the Mac woke after the deadline, or 2 when it ended more than `GRACE` seconds late; `main` then exits 3 without sleeping.
 - `STUB_RUNNING`: space-separated app names the fake `pgrep` reports as running. It only answers `pgrep -xqU $FAKE_UID <app>` (this user's apps, via `app_running`).
 
@@ -80,7 +81,7 @@ Tests that call the real `pause_media`/`go_to_sleep`/`ask_media_permission` code
 
 ## Conventions
 
-- `main` handles `-h`/`--help`/`help`, `themes [name]`, unknown `-*` options (exit 2), a duration argument, or falls back to the prompt. The help text is in `usage()`.
+- `main` handles `-h`/`--help`/`help`, `themes [name]`, `yolo`/`--yolo [off]`, unknown `-*` options (exit 2), a duration argument, or falls back to the prompt. The help text is in `usage()`.
 - User-facing strings (the prompt, the "Sleeping in …" and "Goes to sleep at …" lines, error hints, `Cancelled — not sleeping.`) are asserted as substrings in the tests and quoted in the README. When you change one, update all three places: the script, the tests and the README.
 - The README is a step-by-step guide for non-technical users. Keep its wording simple, and update it whenever prompts, messages or commands change.
 - Implementation plans live in `docs/superpowers/plans/`. Work happens on `feat/*` branches and lands via a PR to `master`.
