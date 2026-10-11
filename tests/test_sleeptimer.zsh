@@ -24,18 +24,24 @@ assert_fails() {  # assert_fails <name> <cmd...>
   fi
 }
 
-# Fake sudo / pmset / caffeinate, so no test ever changes real power settings.
+# Fake sudo / pmset / caffeinate / osascript / pgrep, so no test ever changes real power settings or pauses real apps.
 # The fake pmset remembers "disablesleep N" in $FAKE_STATE; until then "pmset -g" reports $STUB_SLEEP_DISABLED.
 # STUB_SUDO_RC != 0 makes every sudo call fail; STUB_SUDO_N_RC != 0 fails only "sudo -n" (background guard).
 # The fake sudo points the guard's fixed PATH at the fakes. Every call is appended to $FAKE_LOG.
+# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang (2: and ignore TERM; the mute line hangs only with STUB_MUTE_HANG=1); STUB_SLEEPNOW_RC sets
+# "pmset sleepnow"'s; STUB_RUNNING lists the apps the fake pgrep reports as running.
+# STUB_PMSET_STUCK=1 makes the fake pmset ignore "disablesleep 0" (a guard that never restores).
+# STUB_WAKETIME is the epoch second the fake "sysctl -n kern.waketime" reports as the last wake (default 0).
 fake_bin=$(mktemp -d)
-export FAKE_BIN=$fake_bin FAKE_LOG=$fake_bin/calls.log FAKE_STATE=$fake_bin/state
+export FAKE_BIN=$fake_bin FAKE_LOG=$fake_bin/calls.log FAKE_STATE=$fake_bin/state FAKE_UID=$UID
 export STUB_SLEEP_DISABLED=0 STUB_SUDO_RC=0 STUB_SUDO_N_RC=0
+export STUB_OSASCRIPT_RC=0 STUB_OSASCRIPT_HANG=0 STUB_SLEEPNOW_RC=0 STUB_RUNNING= STUB_PMSET_STUCK=0
 print -l '#!/bin/sh' \
   'if [ "$1" = "-g" ]; then v=$(cat "$FAKE_STATE" 2>/dev/null || echo "$STUB_SLEEP_DISABLED")' \
   '  printf "System-wide power settings:\n SleepDisabled\t\t%s\nCurrently in use:\n sleep 1\n" "$v"; exit 0; fi' \
   'echo "pmset $*" >> "$FAKE_LOG"' \
-  '[ "$2" = "disablesleep" ] && echo "$3" > "$FAKE_STATE"' \
+  '[ "$1" = "sleepnow" ] && exit "$STUB_SLEEPNOW_RC"' \
+  'if [ "$2" = "disablesleep" ] && ! { [ "$3" = 0 ] && [ "$STUB_PMSET_STUCK" = 1 ]; }; then echo "$3" > "$FAKE_STATE"; fi' \
   'exit 0' > $fake_bin/pmset
 print -l '#!/bin/sh' \
   'echo "sudo $*" >> "$FAKE_LOG"' \
@@ -44,8 +50,29 @@ print -l '#!/bin/sh' \
   'if [ "$1" = "-n" ]; then [ "$STUB_SUDO_N_RC" = 0 ] || exit "$STUB_SUDO_N_RC"; shift; fi' \
   'if [ "$1" = "/bin/zsh" ]; then exec zsh "$2" "$3" "$(printf %s "$4" | sed "s#PATH=/usr/bin#PATH=$FAKE_BIN:/usr/bin#")"; fi' \
   'exec "$@"' > $fake_bin/sudo
-print -l '#!/bin/sh' 'echo "caffeinate $*" >> "$FAKE_LOG"' > $fake_bin/caffeinate
+print -l '#!/bin/sh' \
+  'echo "caffeinate $*" >> "$FAKE_LOG"; echo "caffeinate pid $$" >> "$FAKE_LOG"' \
+  "trap 'echo \"caffeinate stopped\" >> \"\$FAKE_LOG\"; exit 0' TERM" \
+  'while kill -0 "$3" 2>/dev/null; do sleep 0.2; done' > $fake_bin/caffeinate
+print -l '#!/bin/sh' \
+  'echo "osascript $*" >> "$FAKE_LOG"' \
+  'case "$2" in *"set volume"*) [ "$STUB_MUTE_HANG" = 1 ] && exec sleep 30;; *) [ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30;; esac' \
+  'if [ "$STUB_OSASCRIPT_HANG" = 2 ]; then trap "" TERM; sleep 30; fi' \
+  'exit "$STUB_OSASCRIPT_RC"' > $fake_bin/osascript
+print -l '#!/bin/sh' \
+  '[ "$1" = "-xqU" ] && [ "$2" = "$FAKE_UID" ] || exit 1  # only this user s apps count' \
+  'for app in $STUB_RUNNING; do [ "$app" = "$3" ] && exit 0; done' \
+  'exit 1' > $fake_bin/pgrep
+print -l '#!/bin/sh' \
+  '[ "$2" = "kern.waketime" ] && echo "{ sec = ${STUB_WAKETIME:-0}, usec = 0 } Thu Jan  1 00:00:00 1970"' \
+  '[ "$2" = "kern.boottime" ] && echo "{ sec = 1000, usec = 0 } Thu Jan  1 00:16:40 1970"' \
+  'exit 0' > $fake_bin/sysctl
 chmod +x $fake_bin/*
+
+# Tests that run the real pause/mute/sleep code use path=($fake_bin /bin). That is only safe while /bin
+# holds none of the real tools, so stop everything if it ever does.
+[[ -z $(path=(/bin); whence -p pmset osascript pgrep caffeinate sudo media-control sysctl) ]] ||
+  { print "ABORT: /bin has a real pmset/osascript/pgrep/caffeinate/sudo/media-control; tests would touch the system"; exit 1 }
 
 # parse_duration: bare number uses the default unit; inline unit overrides it
 assert_eq "parse bare uses default" "2700 m" "$(parse_duration 45 m)"
@@ -187,6 +214,17 @@ took=$(( EPOCHSECONDS - t0 ))
 assert_eq "countdown ends at 100%" "yes" "$([[ $out == *'100%  00:00 left'* ]] && print yes)"
 assert_eq "countdown starts at 0%" "yes" "$([[ $out == *'[----------]   0%'* ]] && print yes)"
 assert_eq "countdown duration ok"  "yes" "$( (( took >= 1 && took <= 4 )) && print yes )"
+assert_eq "countdown on time ok" "0" "$( path=($fake_bin /bin); SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+assert_eq "countdown woke after the deadline" "1" \
+  "$( path=($fake_bin /bin); export STUB_WAKETIME=$(( EPOCHSECONDS + 100 )); SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+assert_eq "countdown a little late still fires" "0" \
+  "$( path=($fake_bin /bin); TICK=2.5 SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+assert_eq "countdown far too late (Ctrl+Z, clock change) gives up" "2" \
+  "$( path=($fake_bin /bin); GRACE=0 TICK=2.5 SLEEPTIMER_TUI=0 countdown 1 >/dev/null; print $? )"
+# woke_after: reads the last wake from the kernel; unknown means "no"
+assert_eq "woke_after later wake"   "yes" "$( path=($fake_bin /bin); export STUB_WAKETIME=200; woke_after 100 && print yes )"
+assert_eq "woke_after earlier wake" "no"  "$( path=($fake_bin /bin); export STUB_WAKETIME=50; woke_after 100 && print yes || print no )"
+assert_eq "woke_after no sysctl"    "no"  "$( path=(/nonexistent); woke_after 100 && print yes || print no )"
 
 # countdown (full-screen mode): enters and leaves the alternate screen, last frame is 100%
 out=$(SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 countdown 1)
@@ -207,18 +245,109 @@ assert_eq "term_size override" "100 40" "$(SLEEPTIMER_COLS=100 SLEEPTIMER_ROWS=4
 # go_to_sleep dry run never touches the system
 assert_eq "go_to_sleep dry run" "DRY RUN: pause + mute + sleep" "$(SLEEPTIMER_DRY_RUN=1 go_to_sleep)"
 
-# pause_media: calls `media-control pause` via a stub on PATH; never fails
+# finish_within: waits for background jobs, kills the ones still running after the limit (TERM, then KILL)
+assert_eq "finish_within keeps exit statuses" "0 1 7" \
+  "$(true & a=$!; false & b=$!; sh -c 'exit 7' & c=$!; finish_within 2 $a $b $c; wait $a; x=$?; wait $b; y=$?; wait $c; print "$x $y $?")"
+t0=$EPOCHSECONDS
+assert_eq "finish_within kills hung jobs together" "143 143" \
+  "$(sleep 10 & a=$!; sleep 10 & b=$!; finish_within 1 $a $b; wait $a; x=$?; wait $b; print "$x $?")"
+assert_eq "finish_within shares one limit" "yes" "$( (( EPOCHSECONDS - t0 <= 3 )) && print yes )"
+t0=$EPOCHSECONDS
+assert_eq "finish_within reaps what it killed" "" \
+  "$(sleep 10 & a=$!; finish_within 1 $a; print ${(k)jobstates})"
+assert_eq "finish_within kills a job that ignores TERM" "timed out, gone" \
+  "$(sh -c 'trap "" TERM; sleep 8' >/dev/null & a=$!; finish_within 1 $a
+     (( ${TIMED_OUT[(Ie)$a]} )) && print -n 'timed out'; kill -0 $a 2>/dev/null || print ', gone')"
+assert_eq "finish_within ignoring TERM is still quick" "yes" "$( (( EPOCHSECONDS - t0 <= 4 )) && print yes )"
+
+# pause_media: "Now Playing" via media-control, plus Music/Spotify directly when they're running; never fails.
+# path=(... $fake_bin /bin): fake pgrep/osascript only, so the tests never pause or open real apps.
 stub_dir=$(mktemp -d)
 print -l '#!/bin/sh' 'echo "$@" > "$STUB_LOG"; exit 1' > $stub_dir/media-control
 chmod +x $stub_dir/media-control
 export STUB_LOG=$stub_dir/log
-( path=($stub_dir $path); pause_media )
+( path=($stub_dir $fake_bin /bin); pause_media )
 assert_eq "pause_media sends pause" "pause" "$(<$STUB_LOG)"
-assert_eq "pause_media ignores tool failure" "0" "$( path=($stub_dir $path); pause_media; print $? )"
-assert_eq "pause_media missing tool ok" "0" "$( path=(/nonexistent); pause_media 2>/dev/null; print $? )"
+assert_eq "pause_media ignores tool failure" "0" "$( path=($stub_dir $fake_bin /bin); pause_media; print $? )"
+assert_eq "pause_media missing tool ok" "0" "$( path=($fake_bin /bin); pause_media 2>/dev/null; print $? )"
 assert_eq "pause_media missing tool tip" "yes" \
-  "$( path=(/nonexistent); [[ $(pause_media 2>&1) == *'brew install media-control'* ]] && print yes )"
+  "$( path=($fake_bin /bin); [[ $(pause_media 2>&1) == *'brew install media-control'* ]] && print yes )"
+: > $FAKE_LOG
+( path=($fake_bin /bin); export STUB_RUNNING='Music Spotify'; pause_media 2>/dev/null )
+assert_eq "pause_media pauses Music and Spotify" \
+  'osascript -e if application "Music" is running then tell application "Music" to pause
+osascript -e if application "Spotify" is running then tell application "Spotify" to pause' "$(sort $FAKE_LOG)"
+: > $FAKE_LOG
+( path=($fake_bin /bin); export STUB_RUNNING=; pause_media 2>/dev/null )
+assert_eq "pause_media never opens apps" "" "$(<$FAKE_LOG)"
+: > $FAKE_LOG; rm -f $STUB_LOG
+( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music; pause_media )
+assert_eq "pause_media both ways" "yes" \
+  "$([[ $(<$STUB_LOG) == pause && $(<$FAKE_LOG) == *'"Music" to pause'* ]] && print yes)"
+t0=$EPOCHSECONDS
+( path=($stub_dir $fake_bin /bin); export STUB_RUNNING='Music Spotify' STUB_OSASCRIPT_HANG=2; pause_media 2>/dev/null )
+assert_eq "pause_media gives up on hung apps within ~4 s total" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
+pm_hung=$( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2; pause_media 2>&1 >/dev/null )
+assert_eq "pause_media says when an app hung" "yes" \
+  "$([[ $pm_hung == *"Music didn't answer in time"*'click OK'* ]] && print yes)"
+pm_err=$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_RC=1; pause_media 2>&1 >/dev/null )
+assert_eq "pause_media says when an app didn't pause" "yes" \
+  "$([[ $pm_err == *"Couldn't pause Music"*'Privacy & Security → Automation'* ]] && print yes)"
+assert_eq "pause_media quiet when all is well" "" "$( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music; pause_media 2>&1 )"
+: > $FAKE_LOG
 rm -rf $stub_dir
+
+# ask_media_permission: a harmless query to open apps at the START, so macOS's one-time
+# "Terminal wants to control Music" question shows up while the user is awake, not at sleep time
+( path=($fake_bin /bin); export STUB_RUNNING='Music Spotify'; ask_media_permission ); sleep 0.5
+assert_eq "permission asked at start" \
+  'osascript -e if application "Music" is running then tell application "Music" to get player state
+osascript -e if application "Spotify" is running then tell application "Spotify" to get player state' "$(sort $FAKE_LOG)"
+: > $FAKE_LOG
+( path=($fake_bin /bin); export STUB_RUNNING=; ask_media_permission ); sleep 0.5
+assert_eq "permission never opens apps" "" "$(<$FAKE_LOG)"
+( path=($fake_bin /bin); export STUB_RUNNING=Music SLEEPTIMER_DRY_RUN=1; ask_media_permission ); sleep 0.5
+assert_eq "permission skipped in dry run" "" "$(<$FAKE_LOG)"
+t0=$EPOCHSECONDS
+( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1; ask_media_permission )
+assert_eq "permission doesn't wait for an answer" "yes" "$( (( EPOCHSECONDS - t0 <= 1 )) && print yes )"
+sleep 0.5  # let that background fake log its call before the log is cleared below
+assert_eq "kill_jobs ends a pending permission query" "" \
+  "$( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2; ask_media_permission; sleep 0.3; kill_jobs; sleep 0.3
+      /usr/bin/pgrep -f "$fake_bin/osascript" )"  # the real pgrep, read-only: the fake one can't list processes
+: > $FAKE_LOG
+
+# go_to_sleep, the real (non-dry-run) path, with fakes only: path has no real pmset/osascript (see the tripwire)
+gts() { ( path=($fake_bin /bin); unset SLEEPTIMER_DRY_RUN; (( $# )) && export "$@"; go_to_sleep ) }
+: > $FAKE_LOG; rm -f $FAKE_STATE
+gts_out=$(gts 2>&1); gts_rc=$?
+assert_eq "sleep runs mute then sleepnow" \
+  'osascript -e set volume with output muted
+pmset sleepnow' "$(<$FAKE_LOG)"
+assert_eq "sleep ok exit 0" "0" "$gts_rc"
+: > $FAKE_LOG
+gts_out=$(gts STUB_OSASCRIPT_RC=1 2>&1); gts_rc=$?
+assert_eq "mute fails: no sleepnow" "no" "$([[ $(<$FAKE_LOG) == *sleepnow* ]] && print yes || print no)"
+assert_eq "mute fails: exit 1" "1" "$gts_rc"
+assert_eq "mute fails: says so" "yes" \
+  "$([[ $gts_out == *"Couldn't mute the sound and put the Mac to sleep"* ]] && print yes)"
+gts_out=$(gts STUB_SLEEPNOW_RC=1 2>&1); gts_rc=$?
+assert_eq "sleepnow fails: exit 1" "1" "$gts_rc"
+assert_eq "sleepnow fails: says so" "yes" \
+  "$([[ $gts_out == *"Couldn't mute the sound and put the Mac to sleep"* ]] && print yes)"
+t0=$EPOCHSECONDS
+: > $FAKE_LOG
+gts_out=$(gts STUB_MUTE_HANG=1 MUTE_SECS=1 2>&1); gts_rc=$?
+assert_eq "mute hangs: watchdog ends it" "yes" "$( (( EPOCHSECONDS - t0 <= 4 )) && print yes )"
+assert_eq "mute hangs: exit 1" "1" "$gts_rc"
+assert_eq "mute hangs: says so" "yes" \
+  "$([[ $gts_out == *"Couldn't mute the sound and put the Mac to sleep"* ]] && print yes)"
+assert_eq "mute hangs: no sleepnow" "no" "$([[ $(<$FAKE_LOG) == *sleepnow* ]] && print yes || print no)"
+gts_out=$(gts STUB_SLEEP_DISABLED=1 2>&1); gts_rc=$?
+assert_eq "sleep blocked: exit 1" "1" "$gts_rc"
+assert_eq "sleep blocked: says how to fix" "yes" \
+  "$([[ $gts_out == *'may not have gone to sleep'*'sleeptimer yolo off'* ]] && print yes)"
+: > $FAKE_LOG; rm -f $FAKE_STATE
 
 # end-to-end: executed script, dry run, compact mode
 run() { PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
@@ -227,21 +356,36 @@ e2e=$(print 1s | run 2>/dev/null)
 assert_eq "e2e announces"      "yes" "$([[ $e2e == *'Sleeping in 00:01 (1 second = 0.02 minutes).'* ]] && print yes)"
 assert_eq "e2e shows sleep at" "yes" "$([[ $e2e == *'Goes to sleep at '[0-9][0-9]:[0-9][0-9]* ]] && print yes)"
 assert_eq "e2e dry-runs"       "yes" "$([[ $e2e == *'DRY RUN: pause + mute + sleep'* ]] && print yes)"
+assert_eq "e2e says time's up" "yes" \
+  "$([[ $e2e == *"Time's up: pausing, muting and putting your Mac to sleep."*'DRY RUN'* ]] && print yes)"
 assert_eq "e2e remembers unit" "yes" "$( grep -qx 'unit=s' $SLEEPTIMER_CONFIG && grep -qx 'last=1' $SLEEPTIMER_CONFIG && print yes )"
 e2e=$(print 1 | run 2>/dev/null)
 assert_eq "e2e bare number uses remembered unit" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
 e2e=$(run 1s 2>/dev/null </dev/null)
 assert_eq "e2e argument skips prompt" "yes" "$([[ $e2e == *'DRY RUN'* ]] && print yes)"
+assert_eq "e2e dry run asks no permission" "" \
+  "$(: > $FAKE_LOG; STUB_RUNNING=Music run 1s >/dev/null 2>&1; cat $FAKE_LOG)"
 assert_eq "e2e bad argument exit" "1" "$(run banana >/dev/null 2>&1; print $?)"
 assert_eq "e2e bad argument hint" "yes" "$([[ $(run banana 2>&1) == *'sleeptimer -h'* ]] && print yes)"
 assert_eq "e2e too long explains" "yes" "$([[ $(run 25h 2>&1) == *'longer than 24 hours'* ]] && print yes)"
 assert_eq "e2e too long exit 1" "1" "$(run 25h >/dev/null 2>&1; print $?)"
+e2e=$(STUB_WAKETIME=$(( EPOCHSECONDS + 100 )) run 1s 2>/dev/null); e2e_rc=$?
+assert_eq "e2e late: explains"     "yes" "$([[ $e2e == *'Time ran out while your Mac was asleep'* ]] && print yes)"
+assert_eq "e2e late: never sleeps" "no"  "$([[ $e2e == *'DRY RUN'* ]] && print yes || print no)"
+assert_eq "e2e late: exit 3"       "3"   "$e2e_rc"
+e2e=$(SLEEPTIMER_TICK=2.5 SLEEPTIMER_GRACE=0 run 1s 2>/dev/null); e2e_rc=$?
+assert_eq "e2e ended late: explains"     "yes" "$([[ $e2e == *'The timer ended late, so it won'"'"'t put your Mac to sleep now.'* ]] && print yes)"
+assert_eq "e2e ended late: never sleeps" "no"  "$([[ $e2e == *'DRY RUN'* ]] && print yes || print no)"
+assert_eq "e2e ended late: exit 3"       "3"   "$e2e_rc"
 
 # end-to-end: help and options
 assert_eq "help -h"      "yes" "$([[ $(run -h) == *'Usage:'*'sleeptimer themes'* ]] && print yes)"
 assert_eq "help --help"  "yes" "$([[ $(run --help) == *'Usage:'* ]] && print yes)"
 assert_eq "help exit 0"  "0"   "$(run -h >/dev/null; print $?)"
 assert_eq "bad option exit 2" "2" "$(run -x >/dev/null 2>&1; print $?)"
+assert_eq "version" "sleeptimer 0.1.0" "$(run --version)"
+assert_eq "version -v" "sleeptimer 0.1.0" "$(run -v)"
+assert_eq "help mentions version" "yes" "$([[ $(run -h) == *'sleeptimer --version'* ]] && print yes)"
 
 # end-to-end: themes command
 assert_eq "themes set"      "yes" "$([[ $(run themes ocean) == 'Theme set to ocean'* ]] && print yes)"
@@ -270,6 +414,66 @@ assert_eq "cancel message"          "yes" "$([[ $out == *'Cancelled — not slee
 assert_eq "cancel never sleeps"     "no"  "$([[ $out == *'DRY RUN'* ]] && print yes || print no)"
 rm -f $log
 
+# end-to-end: closing the window (HUP) mid-countdown stops quietly, fast, and never sleeps
+log=$(mktemp)
+rm -f $FAKE_STATE
+PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 zsh $SCRIPT 30s >$log 2>&1 &
+pid=$!
+sleep 1.5
+t0=$EPOCHSECONDS
+kill -HUP $pid
+wait $pid
+assert_eq "hangup exit 129"        "129" "$?"
+assert_eq "hangup is quick"        "yes" "$( (( EPOCHSECONDS - t0 <= 2 )) && print yes )"
+out=$(<$log)
+assert_eq "hangup no message"      "no"  "$([[ $out == *Cancelled* ]] && print yes || print no)"
+assert_eq "hangup never sleeps"    "no"  "$([[ $out == *'DRY RUN'* ]] && print yes || print no)"
+assert_eq "hangup restores screen" "yes" "$([[ $out == *$'\e[?25h\e[?1049l'* ]] && print yes)"
+# ...also while the "Heads up" warning pauses for 3 s, before full screen starts
+STUB_SLEEP_DISABLED=1 PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=1 SLEEPTIMER_COLS=60 SLEEPTIMER_ROWS=20 zsh $SCRIPT 1s >$log 2>&1 &
+pid=$!
+sleep 1
+kill -HUP $pid
+wait $pid
+assert_eq "hangup during heads-up exit 129"   "129" "$?"
+assert_eq "hangup during heads-up never sleeps" "no" "$([[ $(<$log) == *'DRY RUN'* ]] && print yes || print no)"
+rm -f $log
+assert_eq "hangup in subshell silent" "" "$(hangup 2>&1)"
+
+# end-to-end, not a dry run, but PATH holds only the fakes and /bin (see the tripwire), and it is
+# stopped long before the timer ends: Ctrl+C or a closed window must also end the permission query
+for sig in TERM HUP QUIT KILL; do
+  env PATH=$fake_bin:/bin STUB_RUNNING=Music STUB_OSASCRIPT_HANG=2 SLEEPTIMER_TUI=0 /bin/zsh $SCRIPT 30s >/dev/null 2>&1 &
+  pid=$!
+  sleep 1.5
+  kill -$sig $pid; wait $pid; rc=$?
+  sleep 1.5
+  assert_eq "$sig ends the permission query" "" "$(pgrep -f "$fake_bin/osascript")"
+  [[ $sig == QUIT ]] && assert_eq "QUIT cancels like Ctrl+C" "130" "$rc"
+done
+
+# once the timer has run out it finishes pause + mute + sleep even if the window closes or Ctrl+C
+# comes in the middle (the pause step is made slow by a hung app); fakes only, as above
+for sig in HUP INT; do
+  : > $FAKE_LOG; rm -f $FAKE_STATE
+  env PATH=$fake_bin:/bin STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1 SLEEPTIMER_TUI=0 /bin/zsh $SCRIPT 1s >/dev/null 2>&1 &
+  pid=$!
+  sleep 2.5
+  kill -$sig $pid; wait $pid; rc=$?
+  assert_eq "$sig during the final step still sleeps" "yes" "$(grep -qx 'pmset sleepnow' $FAKE_LOG && print yes)"
+  assert_eq "$sig during the final step exit 0" "0" "$rc"
+done
+# Ctrl+Z in the final step must not freeze it half done (an fg hours later would sleep the Mac by surprise)
+: > $FAKE_LOG
+env PATH=$fake_bin:/bin STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1 SLEEPTIMER_TUI=0 /bin/zsh $SCRIPT 1s >/dev/null 2>&1 &
+pid=$!
+sleep 2.5
+kill -TSTP $pid
+sleep 4
+assert_eq "TSTP during the final step still sleeps" "yes" "$(grep -qx 'pmset sleepnow' $FAKE_LOG && print yes)"
+kill -CONT $pid 2>/dev/null; wait $pid
+: > $FAKE_LOG
+
 # sleep_disabled reads pmset -g
 assert_eq "sleep_disabled 0" "0" "$( path=($fake_bin $path); STUB_SLEEP_DISABLED=0; sleep_disabled )"
 assert_eq "sleep_disabled 1" "1" "$( path=($fake_bin $path); export STUB_SLEEP_DISABLED=1; sleep_disabled )"
@@ -277,8 +481,13 @@ assert_eq "sleep_disabled no pmset" "0" "$( path=(/nonexistent); sleep_disabled 
 
 # yolo_guard: restores the previous value once the pid is gone
 assert_eq "yolo_guard command" \
-  "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; pmset -a disablesleep 1; while kill -0 42 2>/dev/null; do sleep 1; done; pmset -a disablesleep 0" \
+  "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; t=\$(ps -p 42 -o lstart= 2>/dev/null); pmset -a disablesleep 1; while [ -n \"\$t\" ] && [ \"\$(ps -p 42 -o lstart= 2>/dev/null)\" = \"\$t\" ]; do sleep 1; done; pmset -a disablesleep 0" \
   "$(yolo_guard 42 0)"
+# the guard tells caffeinate from a later process that got the same pid, by its start time
+assert_eq "yolo_guard ends when the pid is reused" "0" \
+  "$( sleep 5 & p=$!; g=$(yolo_guard $p 0); g=${g//pmset -a disablesleep/: }
+      zsh -fc "${g/exec >\/dev\/null 2>&1 <\/dev\/null;/}" & gp=$!; sleep 0.5; kill $p; wait $p 2>/dev/null
+      sleep 1.5; kill -0 $gp 2>/dev/null && { kill $gp; print 1 } || print 0 )"
 
 # render_yolo: big "time awake", lid status, centered, never wider than the terminal
 yolo_ok() {  # yolo_ok <cols> <rows> — prints "<lines<=rows> <widest<=cols>" as 1/0
@@ -301,7 +510,7 @@ assert_eq "yolo frame heat warning" "yes" "$([[ $yframe == *"Don't put it in a b
 
 # end-to-end: yolo turns sleep off, keeps the Mac awake, and puts everything back however it ends
 ywait=1.5
-yolo_run() {  # yolo_run <signal> [env...] — run "sleeptimer yolo" $ywait s, stop it, let the guard settle; sets yrc, yout, ylog
+yolo_run() {  # yolo_run <signal> [env...] — run "sleeptimer yolo" $ywait s, stop it, let the guard settle; sets yrc, ystate, yout, ylog
   local out=$(mktemp)
   : > $FAKE_LOG; rm -f $FAKE_STATE
   env PATH=$fake_bin:$PATH SLEEPTIMER_TUI=0 SLEEPTIMER_TICK=0.2 "${@:2}" zsh $SCRIPT yolo >$out 2>&1 &
@@ -310,6 +519,7 @@ yolo_run() {  # yolo_run <signal> [env...] — run "sleeptimer yolo" $ywait s, s
   kill -$1 $pid
   wait $pid
   yrc=$?
+  ystate=$(cat $FAKE_STATE 2>/dev/null)  # sleep setting at the moment the script exited
   sleep 2.5
   yout=$(<$out) ylog=$(<$FAKE_LOG)
   rm -f $out
@@ -325,9 +535,19 @@ assert_eq "yolo caffeinates"       "yes" "$([[ $ylog == *'caffeinate -dims -w '[
 assert_eq "yolo warns about heat"  "yes" "$([[ $yout == *"Don't put it in a bag"* ]] && print yes)"
 assert_eq "yolo shows time awake"  "yes" "$([[ $yout == *'Awake for 00:0'* ]] && print yes)"
 assert_eq "yolo stop message"      "yes" "$([[ $yout == *'YOLO off after'*'Your Mac can sleep again.'* ]] && print yes)"
+assert_eq "yolo stop waits for sleep to be back" "0" "$ystate"
+assert_eq "yolo stop ends caffeinate" "yes" "$([[ $ylog == *'caffeinate stopped'* ]] && print yes)"
+cpid=${${(M)${(f)ylog}:#caffeinate pid *}#caffeinate pid }
+assert_eq "yolo guard watches caffeinate" "yes" "$([[ -n $cpid && $ylog == *"ps -p $cpid -o lstart="* ]] && print yes)"
 
 yolo_run KILL
 assert_eq "yolo kill -9 still restores" "yes" "$([[ $ylog == *'disablesleep 1'*'pmset -a disablesleep 0'* ]] && print yes)"
+
+yolo_run TERM STUB_PMSET_STUCK=1
+assert_eq "yolo stuck: tells how to fix" "yes" \
+  "$([[ $yout == *'Sleep is still turned off'*'sleeptimer yolo off'* ]] && print yes)"
+assert_eq "yolo stuck: exit 1" "1" "$yrc"
+rm -f $FAKE_STATE
 
 yolo_run TERM STUB_SLEEP_DISABLED=1
 assert_eq "yolo already off: no sudo"     "no"  "$([[ $ylog == *sudo* ]] && print yes || print no)"
@@ -345,6 +565,38 @@ ywait=1.5
 assert_eq "yolo guard failed: lid warning" "yes" "$([[ $yout == *"Couldn't block lid-close sleep"* ]] && print yes)"
 assert_eq "yolo guard failed: no pmset"    "no"  "$(grep -q '^pmset -a disablesleep' <<< $ylog && print yes || print no)"
 
+ymark=${SLEEPTIMER_CONFIG:h}/yolo
+assert_eq "yolo marker gone after a clean stop" "no" "$([[ -e $ymark ]] && print yes || print no)"
+
+# a YOLO that never finished (the Mac restarted) left sleep off: the next YOLO turns it back on at the end
+print "999999 0 1" > $ymark  # booted at 1 then; the fake sysctl says this boot started at 1000
+yolo_run TERM STUB_SLEEP_DISABLED=1
+assert_eq "yolo leftover: says so"       "yes" "$([[ $yout == *'left sleep turned off'* ]] && print yes)"
+assert_eq "yolo leftover: restores on"   "yes" "$([[ $ylog == *'pmset -a disablesleep 0'* ]] && print yes)"
+assert_eq "yolo leftover: marker gone"   "no"  "$([[ -e $ymark ]] && print yes || print no)"
+# after a restart pids are handed out again: a marker from an earlier boot is a leftover even if its pid is alive
+print "$$ 0 1" > $ymark
+yolo_run TERM STUB_SLEEP_DISABLED=1
+assert_eq "yolo leftover despite a reused pid" "yes" "$([[ $yout == *'left sleep turned off'* ]] && print yes)"
+# ...but a marker from this boot (kill -9: the guard already restored) is not a leftover
+print "999999 0 1000" > $ymark
+yolo_run TERM STUB_SLEEP_DISABLED=1
+assert_eq "yolo same-boot marker: no sudo" "no" "$([[ $ylog == *sudo* ]] && print yes || print no)"
+assert_eq "yolo same-boot marker: cleaned" "no" "$([[ -e $ymark ]] && print yes || print no)"
+
+# caffeinate dying on its own ends YOLO honestly instead of claiming the Mac is still kept awake
+: > $FAKE_LOG; rm -f $FAKE_STATE
+ylost=$(mktemp)
+env PATH=$fake_bin:$PATH SLEEPTIMER_TUI=0 SLEEPTIMER_TICK=0.2 zsh $SCRIPT yolo >$ylost 2>&1 &
+pid=$!
+sleep 1.5
+kill ${${(M)${(f)"$(<$FAKE_LOG)"}:#caffeinate pid *}#caffeinate pid }
+sleep 4
+assert_eq "yolo lost caffeinate: exits by itself" "no" "$(kill -0 $pid 2>/dev/null && print yes || print no)"
+kill $pid 2>/dev/null; wait $pid
+assert_eq "yolo lost caffeinate: says so" "yes" "$([[ $(<$ylost) == *'stopped unexpectedly'* ]] && print yes)"
+rm -f $ylost; sleep 1.5
+
 yolo_run TERM SLEEPTIMER_DRY_RUN=1
 assert_eq "yolo dry run: no sudo"        "no"  "$([[ $ylog == *sudo* ]] && print yes || print no)"
 assert_eq "yolo dry run: no caffeinate"  "no"  "$([[ $ylog == *caffeinate* ]] && print yes || print no)"
@@ -355,6 +607,9 @@ assert_eq "yolo tui enters alt screen"    "yes" "$([[ $yout == *$'\e[?1049h'*'aw
 assert_eq "yolo tui restores terminal"    "yes" "$([[ $yout == *$'\e[?25h\e[?1049l'*'YOLO off'* ]] && print yes)"
 
 assert_eq "yolo bad arg exit 2" "2" "$(run yolo nope >/dev/null 2>&1; print $?)"
+rm -f $FAKE_STATE
+assert_eq "--yolo off works" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 run --yolo off 2>&1) == *'DRY RUN'* ]] && print yes)"
+assert_eq "help mentions --yolo" "yes" "$([[ $(run -h) == *'sleeptimer --yolo'* ]] && print yes)"
 
 # stop handlers inherited by a $(...) helper must exit quietly and leave the work to the main shell
 assert_eq "yolo_stop in subshell silent" "" "$(YOLO_START=$EPOCHSECONDS; yolo_stop 2>&1)"
@@ -365,7 +620,9 @@ yrun() { PATH=$fake_bin:$PATH SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
 : > $FAKE_LOG; rm -f $FAKE_STATE
 assert_eq "yolo off when on"  "yes" "$([[ $(yrun yolo off) == *'already on'* ]] && print yes)"
 assert_eq "yolo off no sudo"  ""    "$(<$FAKE_LOG)"
+print "999999 0" > $ymark
 assert_eq "yolo off when off" "yes" "$([[ $(STUB_SLEEP_DISABLED=1 yrun yolo off) == *'Sleep is back on.'* ]] && print yes)"
+assert_eq "yolo off clears the marker" "no" "$([[ -e $ymark ]] && print yes || print no)"
 assert_eq "yolo off runs pmset" "yes" "$( grep -qx 'sudo pmset -a disablesleep 0' $FAKE_LOG && print yes )"
 rm -f $FAKE_STATE
 assert_eq "yolo off sudo fails" "1" "$(STUB_SLEEP_DISABLED=1 STUB_SUDO_RC=1 yrun yolo off >/dev/null 2>&1; print $?)"

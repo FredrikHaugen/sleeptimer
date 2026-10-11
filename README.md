@@ -77,8 +77,13 @@ Paste this into Terminal and press **Return**:
 brew install media-control
 ```
 
-If you skip this step, sleeptimer still mutes the sound and puts the Mac to
-sleep, but it doesn't pause anything.
+If you skip this step, sleeptimer still pauses **Apple Music** and **Spotify**,
+mutes the sound and puts the Mac to sleep. It just can't pause YouTube and
+other players.
+
+If Apple Music or Spotify is open when you start a timer, macOS may ask once
+whether **Terminal** may control it. Click **OK**, so the timer can pause it
+later while you sleep. It only asks this the first time.
 
 You're done with setup. You can delete the ZIP and the `sleeptimer-master`
 folder from Downloads if you like.
@@ -110,11 +115,14 @@ Goes to sleep at 23:45. Ctrl+C to cancel.
 
 **Help:** `sleeptimer -h` lists everything it can do.
 
+**Version:** `sleeptimer --version`.
+
 **Leave the Terminal window open.** You can minimize it with the yellow button,
 but don't close it, or the timer stops.
 
-When the bar reaches 100%, whatever is playing gets paused, the sound turns off
-and the Mac goes to sleep.
+When the bar reaches 100%, you'll see `Time's up: pausing, muting and putting
+your Mac to sleep.` Whatever is playing gets paused, the sound turns off and the
+Mac goes to sleep.
 
 ---
 
@@ -124,6 +132,11 @@ Click the Terminal window and press **Control + C**. That's the **control**
 key, not Command.
 
 You'll see `Cancelled — not sleeping.`, and nothing gets paused, muted or put to sleep.
+
+Closing the Terminal window cancels the timer too, the same way.
+
+Once the bar reaches 100% it's too late to cancel: it always finishes pausing,
+muting and sleeping, so the Mac is never left muted but awake.
 
 ---
 
@@ -162,10 +175,13 @@ sleeptimer yolo
 - **Don't put the Mac in a bag while YOLO is on.** It won't sleep and can get
   very hot.
 - Press **Control + C** (or close the Terminal window) and everything goes back
-  to normal within a second or two.
+  to normal within a second or two. After Control + C it tells you
+  `Your Mac can sleep again.` once that's really true.
+- `sleeptimer --yolo` does the same thing as `sleeptimer yolo`.
 
 If your Mac ever refuses to sleep afterwards (for example, it restarted while
 YOLO was on), type **`sleeptimer yolo off`**.
+The next `sleeptimer yolo` also notices this and turns sleep back on when you stop it.
 
 ---
 
@@ -189,9 +205,17 @@ click the speaker icon at the top of the screen.
 | The timer is in the wrong unit | A plain number uses the unit you used last time. Press **Control + C**, then add the unit, like `45m`. |
 | Colors look strange | Try `sleeptimer themes classic`. |
 | `Heads up: sleep is turned off system-wide` | Something (YOLO, or another keep-awake app) switched sleep off, so the timer may not be able to put the Mac to sleep. Type `sleeptimer yolo off` to switch it back on. |
+| `Sleep is turned off system-wide, so your Mac may not have gone to sleep` | Same cause as above: something switched sleep off while the timer ran. Type `sleeptimer yolo off`. |
+| `Couldn't mute the sound and put the Mac to sleep.` | macOS refused, or didn't answer within 10 seconds. Put the Mac to sleep from the Apple menu → **Sleep** this time. If it keeps happening, restart the Mac. |
 | The timer stopped by itself | The Terminal window was probably closed. Start it again and leave the window open. |
-| `Tip: brew install media-control ...` when the timer ends | Nothing was paused because Step 4 was skipped. Do **Step 4** if you want pausing. |
-| Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. |
+| `Time ran out while your Mac was asleep, so it won't go to sleep now.` | The Mac went to sleep on its own (for example, you closed the lid) before the timer ended. sleeptimer doesn't mute it or put it back to sleep when you wake it. Nothing to fix. |
+| `The timer ended late, so it won't put your Mac to sleep now.` | The timer was paused (for example with Control + Z) or the clock changed, so it ended more than a minute late. It doesn't mute or sleep the Mac by surprise. Start it again if you still want it. |
+| `Sleep is still turned off.` after YOLO | Type `sleeptimer yolo off` and enter your Mac password. |
+| `The keep-awake helper (caffeinate) stopped unexpectedly, so YOLO has ended.` | Something stopped the part that keeps the Mac awake. Your Mac can sleep normally again. Start `sleeptimer yolo` again if you still need it. |
+| `Tip: brew install media-control ...` when the timer ends | Only Apple Music and Spotify were paused, because Step 4 was skipped. Do **Step 4** to pause YouTube and other players too. |
+| Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. For Apple Music or Spotify, check **System Settings → Privacy & Security → Automation** and allow Terminal to control them. |
+| `Couldn't pause Music. ...` (or Spotify) | The app didn't answer within 3 seconds, or Terminal isn't allowed to control it. Allow Terminal in **System Settings → Privacy & Security → Automation**. The Mac still went to sleep. |
+| `Music didn't answer in time, so it may still be playing.` (or Spotify) | The app was busy or frozen when the timer ended. The Mac still muted and went to sleep. |
 | I want a different time | Press **Control + C** to cancel, then run `sleeptimer` again. |
 
 ---
@@ -213,6 +237,8 @@ Environment variables:
 |---|---|---|
 | `SLEEPTIMER_DRY_RUN` | Any non-empty value prints a message instead of pausing, muting and sleeping | off |
 | `SLEEPTIMER_TICK` | Seconds between progress-bar redraws | `1` |
+| `SLEEPTIMER_GRACE` | Seconds late the timer may end (for example after Control + Z) before it gives up instead of sleeping | `60` |
+| `SLEEPTIMER_MUTE_SECS` | Seconds the final mute + sleep step may hang before it is stopped and reported | `10` |
 | `SLEEPTIMER_BAR_WIDTH` | Width of the one-line bar (used when output isn't a terminal) | `30` |
 | `SLEEPTIMER_CONFIG` | Where settings (last unit, last time, theme) are saved | `~/.config/sleeptimer/config` |
 | `SLEEPTIMER_TUI` | `1` forces the full-screen view, `0` forces the one-line bar | full screen when output is a terminal |
@@ -225,7 +251,13 @@ When the timer ends, it runs exactly:
 
 ```
 media-control pause   # skipped (with a tip) if media-control isn't installed; errors ignored
+osascript -e 'if application "Music" is running then tell application "Music" to pause'
+osascript -e 'if application "Spotify" is running then tell application "Spotify" to pause'
 osascript -e "set volume with output muted" && pmset sleepnow
 ```
+
+The pauses run at the same time and get 3 seconds in total, then are stopped, so a hung app can't keep the Mac awake.
+When the timer starts, open Music and Spotify get a harmless `get player state`
+query, so macOS asks for the one-time Automation permission while you're awake.
 
 </details>

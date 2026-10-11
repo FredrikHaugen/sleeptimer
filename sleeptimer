@@ -1,7 +1,9 @@
 #!/usr/bin/env zsh
 # sleeptimer — count down with a progress bar, then pause media, mute and put the Mac to sleep.
+VERSION=0.1.0
 
 zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
+zmodload zsh/system    # provides $sysparams (a subshell's own pid and parent pid)
 
 # Bar and digit characters are multibyte; count widths in characters, not bytes.
 [[ ${LC_ALL:-${LC_CTYPE:-$LANG}} == *[Uu][Tt][Ff](-|)8* ]] || LC_ALL=en_US.UTF-8
@@ -9,6 +11,7 @@ zmodload zsh/datetime  # provides $EPOCHSECONDS and strftime
 BAR_WIDTH=${SLEEPTIMER_BAR_WIDTH:-30}
 TICK=${SLEEPTIMER_TICK:-1}
 MAX_SECS=86400  # 24 hours: guards against "45" meaning 45 hours when the remembered unit is h
+GRACE=${SLEEPTIMER_GRACE:-60}  # a timer that ends this many seconds late (Ctrl+Z, clock change) gives up
 CONFIG=${SLEEPTIMER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleeptimer/config}
 
 typeset -A UNIT_SECS=(s 1 m 60 h 3600)
@@ -316,7 +319,22 @@ draw_screen() {
   draw_frame "$(render_screen $1 $2 $size[1] $size[2] $3 $EPOCHSECONDS)"
 }
 
-# countdown <total> — redraw until total seconds of wall-clock time pass.
+# kern_secs <name> — the seconds of a kernel timestamp such as kern.waketime or kern.boottime; fails if unknown.
+kern_secs() {
+  local line
+  line=$(sysctl -n $1 2>/dev/null) || return 1
+  [[ $line =~ 'sec = ([0-9]+)' ]] && print $match[1]
+}
+
+# woke_after <epoch> — true if the Mac last woke from sleep after <epoch> (kern.waketime); false if unknown.
+woke_after() {
+  local t
+  t=$(kern_secs kern.waketime) && (( t > $1 ))
+}
+
+# countdown <total> — redraw until total seconds of wall-clock time pass. Returns 1 if the Mac woke from
+# sleep after the deadline (it was asleep when time ran out), 2 if it ended more than GRACE seconds late
+# for another reason (Ctrl+Z, a clock change). Either way, sleeping now would surprise the user.
 countdown() {
   local total=$1 start=$EPOCHSECONDS elapsed=0
   local end=$(( start + total ))
@@ -337,6 +355,9 @@ countdown() {
     done
     printf '\r%s\e[K\n' "$(render_bar $total $total)"
   fi
+  woke_after $end && return 1
+  (( elapsed - total > GRACE )) && return 2
+  return 0
 }
 
 # sleep_disabled — prints 1 if sleep is turned off system-wide (pmset disablesleep), else 0.
@@ -348,47 +369,198 @@ sleep_disabled() {
   print 0
 }
 
-# wait_sleep_disabled — poll up to ~3 s for the guard to switch sleep off; false if it never does.
-wait_sleep_disabled() {
+# wait_sleep_state <0|1> — poll up to ~3 s until sleep_disabled reports <0|1>; false if it never does.
+wait_sleep_state() {
   repeat 15; do
-    (( $(sleep_disabled) )) && return 0
+    (( $(sleep_disabled) == $1 )) && return 0
     sleep 0.2
   done
   return 1
 }
 
-# yolo_guard <pid> <prev> — the root command YOLO runs: turn sleep off, then put <prev> back
-# once <pid> is gone. It polls instead of trapping, so it still restores after kill -9 or a closed window.
+# yolo_guard <pid> <prev> — the root command YOLO runs: turn sleep off, then put <prev> back once <pid>
+# (YOLO's caffeinate, which exits with the script) is gone. It polls instead of trapping, so it still
+# restores after kill -9 or a closed window. It compares the process start time, so a later process
+# that reuses the pid doesn't keep sleep off.
 # Fixed PATH and detached stdio: root must not run the user's pmset, or die on a closed pipe.
 yolo_guard() {
-  print -r -- "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; pmset -a disablesleep 1; while kill -0 $1 2>/dev/null; do sleep 1; done; pmset -a disablesleep $2"
+  print -r -- "PATH=/usr/bin:/bin:/usr/sbin:/sbin; exec >/dev/null 2>&1 </dev/null; trap '' INT HUP TERM PIPE; t=\$(ps -p $1 -o lstart= 2>/dev/null); pmset -a disablesleep 1; while [ -n \"\$t\" ] && [ \"\$(ps -p $1 -o lstart= 2>/dev/null)\" = \"\$t\" ]; do sleep 1; done; pmset -a disablesleep $2"
 }
 
-# pause_media — pause whatever is "Now Playing" (needs `brew install media-control`).
-# Never fails: a missing tool or nothing playing must not stop the Mac sleeping.
-pause_media() {
-  if (( ! $+commands[media-control] )); then
-    print -u2 "Tip: brew install media-control to also pause music and videos."
-    return 0
-  fi
-  media-control pause 2>/dev/null
+MEDIA_APPS=(Music Spotify)  # paused directly with AppleScript when they're open, media-control or not
+MUTE_SECS=${SLEEPTIMER_MUTE_SECS:-10}  # the mute + sleep line is ended if it hangs this long
+
+# app_running <name> — true if this user has <name> open (another logged-in user's copy doesn't count).
+app_running() {
+  pgrep -xqU $UID $1 2>/dev/null
+}
+
+# app_script <app> <command> — AppleScript that sends <command> only if <app> is still running, so it
+# can never open an app that quit after app_running checked.
+app_script() {
+  print -r -- "if application \"$1\" is running then tell application \"$1\" to $2"
+}
+
+# finish_within <seconds> <pid...> — wait for background jobs, giving them <seconds> in total. Any still
+# running get TERM, then KILL a second later, so this never blocks longer than <seconds> + 1.
+# Their exit statuses stay available to `wait <pid>`; the ones that had to be killed are in TIMED_OUT.
+finish_within() {
+  local secs=$1 p; shift
+  local -a left=($@)
+  TIMED_OUT=()
+  repeat $(( secs * 5 )); do
+    left=(${left:#0}); for p in $left; do kill -0 $p 2>/dev/null || left=(${left:#$p}); done
+    (( $#left )) || return 0
+    sleep 0.2
+  done
+  TIMED_OUT=($left)
+  kill $left 2>/dev/null
+  repeat 5; do
+    for p in $left; do kill -0 $p 2>/dev/null || left=(${left:#$p}); done
+    (( $#left )) || return 0
+    sleep 0.2
+  done
+  kill -9 $left 2>/dev/null
+  wait $left 2>/dev/null  # reap them, so they leave the job table
   return 0
 }
 
+# kill_children_after <seconds> <pid> — run as a tethered job: after <seconds>, KILL every process <pid>
+# started, except this watchdog's own job. Guards the mute + sleep line, which can't be wrapped itself.
+kill_children_after() {
+  sleep $1
+  local line
+  local -a f
+  for line in ${(f)"$(ps -A -o pid= -o ppid=)"}; do
+    f=(${=line})
+    (( f[2] == $2 && f[1] != sysparams[ppid] )) && kill -9 $f[1] 2>/dev/null
+  done
+}
+
+# tethered <cmd...> — start <cmd> as a background job tied to this script, like caffeinate -w: it is
+# killed within ~0.2 s once the script is gone, even after kill -9 or a crash. TERM to the job ends
+# <cmd> at once. The job exits with <cmd>'s status, so `wait` on it still tells success from failure.
+tethered() {
+  {
+    "$@" &
+    local c=$!
+    trap 'kill -9 $c 2>/dev/null; exit 143' TERM INT HUP QUIT
+    while kill -0 $$ 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 0.2; done
+    kill -0 $$ 2>/dev/null || kill -9 $c 2>/dev/null  # only when the script is gone: <cmd> is still ours then
+    wait $c
+  } &
+}
+
+# kill_jobs — end every background job this shell still runs (pauses, the permission query): TERM,
+# then KILL what is left a second later. Only live jobs of this shell are touched, never a reused pid.
+kill_jobs() {
+  local j
+  for j in ${(k)jobstates}; do kill %$j 2>/dev/null; done
+  repeat 5; do (( ${#jobstates} )) || return 0; sleep 0.2; done
+  for j in ${(k)jobstates}; do kill -9 %$j 2>/dev/null; done
+  return 0
+}
+
+# pause_media — pause "Now Playing" with media-control (brew install media-control), and Music and
+# Spotify directly when they're open. All at once, 3 s in total. Never fails: nothing playing, a
+# missing tool or a hung app must not stop the Mac sleeping.
+pause_media() {
+  local app pid
+  local -A pids  # assigning $! straight to an element stores the text "$!", so go through $pid
+  if (( $+commands[media-control] )); then
+    tethered media-control pause >/dev/null 2>&1
+    pid=$!; pids[media-control]=$pid
+  else
+    print -u2 "Tip: brew install media-control to also pause YouTube and other players."
+  fi
+  for app in $MEDIA_APPS; do
+    app_running $app || continue
+    tethered osascript -e "$(app_script $app pause)" >/dev/null 2>&1
+    pid=$!; pids[$app]=$pid
+  done
+  (( $#pids )) || return 0
+  finish_within 3 $pids
+  for app in $MEDIA_APPS; do
+    [[ -n $pids[$app] ]] || continue
+    if (( ${TIMED_OUT[(Ie)$pids[$app]]} )); then
+      print -u2 "$app didn't answer in time, so it may still be playing. If macOS asked whether Terminal may control it, click OK next time."
+    elif ! wait $pids[$app] 2>/dev/null; then
+      print -u2 "Couldn't pause $app. If Terminal isn't allowed to control it: System Settings → Privacy & Security → Automation."
+    fi
+  done
+  return 0
+}
+
+# ask_media_permission — at the start of the timer, send open media apps a harmless query. macOS asks
+# once whether Terminal may control each app; this makes it ask now, while you're awake to click OK,
+# instead of at sleep time. Runs in the background; kill_jobs ends it when the timer ends or stops.
+ask_media_permission() {
+  [[ -n $SLEEPTIMER_DRY_RUN ]] && return 0
+  local app
+  for app in $MEDIA_APPS; do
+    app_running $app || continue
+    tethered osascript -e "$(app_script $app 'get player state')" >/dev/null 2>&1
+  done
+  return 0
+}
+
+# go_to_sleep — pause, mute and sleep. Returns 1, with the reason, if the Mac couldn't be muted and
+# put to sleep, or if sleep is turned off system-wide (pmset sleepnow then does nothing).
+# The mute + sleep line must stay exactly as it is.
 go_to_sleep() {
   if [[ -n $SLEEPTIMER_DRY_RUN ]]; then
     print "DRY RUN: pause + mute + sleep"
     return
   fi
   pause_media
-  osascript -e "set volume with output muted" && pmset sleepnow
+  local watchdog ok=1
+  tethered kill_children_after $MUTE_SECS $sysparams[pid]
+  watchdog=$!
+  osascript -e "set volume with output muted" && pmset sleepnow || ok=0
+  kill $watchdog 2>/dev/null; wait $watchdog 2>/dev/null
+  if (( ! ok )); then
+    print -u2 "Couldn't mute the sound and put the Mac to sleep."
+    return 1
+  fi
+  if (( $(sleep_disabled) )); then
+    print -u2 "Sleep is turned off system-wide, so your Mac may not have gone to sleep. To fix it: sleeptimer yolo off"
+    return 1
+  fi
 }
 
 cancel() {
   (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
+  kill_jobs
   screen_leave
   print "\nCancelled — not sleeping."
   exit 130
+}
+
+# hangup — the Terminal window was closed: stop without pausing, muting or sleeping. Nobody can read a
+# message now, so print none, and ignore errors from a terminal that is already gone.
+hangup() {
+  (( ZSH_SUBSHELL )) && exit 129  # a $(...) helper caught it; 129 tells the main shell the window closed
+  kill_jobs
+  { screen_leave } 2>/dev/null
+  exit 129  # 128 + SIGHUP, the usual status for a hangup
+}
+
+# yolo_marker — file that records a running YOLO ("<pid> <previous SleepDisabled> <boot time>"), so a YOLO
+# cut short by a restart (the root guard dies too, before it can restore) is recognised next time.
+yolo_marker() { print -r -- ${CONFIG:h}/yolo }
+
+# yolo_leftover — if a YOLO from before the last restart never finished, prints the SleepDisabled value
+# from before it. A marker from this boot means the guard already restored (e.g. after kill -9).
+# Stale markers are removed; prints nothing when there's nothing to fix.
+yolo_leftover() {
+  local -a m
+  m=($(<$(yolo_marker))) 2>/dev/null || return 0
+  local boot=$(kern_secs kern.boottime)
+  # Same boot and its pid is alive: that YOLO is still running. After a restart the pid may have been
+  # handed to another process, so an earlier boot's marker is always a leftover.
+  [[ $m[3] == $boot ]] && kill -0 $m[1] 2>/dev/null && return 0
+  rm -f $(yolo_marker)
+  [[ $m[2] == [01] && -n $boot && $m[3] != $boot ]] && print $m[2]
 }
 
 # yolo_cmd [off] — keep the Mac awake (lid closed too) until Ctrl+C; "off" turns sleep back on for good.
@@ -399,18 +571,26 @@ yolo_cmd() {
     *) print -u2 "Unknown: sleeptimer yolo $1 (try: sleeptimer yolo, or sleeptimer yolo off)"; return 2 ;;
   esac
   local lid=1
-  YOLO_PREV=$(sleep_disabled) YOLO_START=$EPOCHSECONDS
+  YOLO_PREV=$(sleep_disabled) YOLO_START=$EPOCHSECONDS YOLO_CAFF= YOLO_LOST=0
+  local leftover=$(yolo_leftover)
+  if [[ $leftover == 0 ]] && (( YOLO_PREV )); then
+    YOLO_PREV=0
+    print -r -- "A YOLO session that didn't finish (maybe the Mac restarted) left sleep turned off. It will be turned back on when you stop YOLO."
+  fi
   trap yolo_stop INT TERM HUP
   print -r -- "YOLO mode: your Mac stays awake and the screen stays on until you press Ctrl+C."
   print -r -- "Don't put it in a bag while this runs. It won't sleep and can get very hot."
   if [[ -n $SLEEPTIMER_DRY_RUN ]]; then
     print "DRY RUN: not running caffeinate or sudo pmset disablesleep"
   else
+    caffeinate -dims -w $$ >/dev/null 2>&1 &!
+    YOLO_CAFF=$!
     if (( ! YOLO_PREV )); then
       print -r -- "To stay awake with the lid closed, macOS needs your admin password (used only for: pmset disablesleep)."
       if sudo -v; then
-        nohup sudo -n /bin/zsh -f -c "$(yolo_guard $$ $YOLO_PREV)" >/dev/null 2>&1 &!
-        if ! wait_sleep_disabled; then
+        nohup sudo -n /bin/zsh -f -c "$(yolo_guard $YOLO_CAFF $YOLO_PREV)" >/dev/null 2>&1 &!
+        { mkdir -p ${CONFIG:h} && print "$$ $YOLO_PREV $(kern_secs kern.boottime)" > $(yolo_marker) } 2>/dev/null
+        if ! wait_sleep_state 1; then
           lid=0
           print -u2 "Couldn't block lid-close sleep, so closing the lid will still put the Mac to sleep."
         fi
@@ -419,7 +599,6 @@ yolo_cmd() {
         print -u2 "No admin rights, so closing the lid will still put the Mac to sleep."
       fi
     fi
-    caffeinate -dims -w $$ >/dev/null 2>&1 &!
   fi
   use_tui && screen_enter
   local -a size
@@ -430,20 +609,32 @@ yolo_cmd() {
     else
       printf '\rAwake for %s  (Ctrl+C to stop)\e[K' "$(fmt_time $(( EPOCHSECONDS - YOLO_START )))"
     fi
+    if [[ -n $YOLO_CAFF ]] && ! kill -0 $YOLO_CAFF 2>/dev/null; then
+      YOLO_LOST=1
+      yolo_stop
+    fi
     sleep $TICK
   done
 }
 
-# yolo_stop — leave YOLO mode; the root guard and caffeinate notice the exit and undo themselves.
+# yolo_stop — leave YOLO mode: stop caffeinate, which makes the root guard put sleep back, and only
+# say sleep is back once pmset confirms it.
 yolo_stop() {
   (( ZSH_SUBSHELL )) && exit 1  # a $(...) helper caught the signal; the main shell handles it
+  [[ -n $YOLO_CAFF ]] && kill $YOLO_CAFF 2>/dev/null
   screen_leave
   print -r -- $'\n'"YOLO off after $(fmt_time $(( EPOCHSECONDS - YOLO_START )))."
+  (( YOLO_LOST )) && print -u2 "The keep-awake helper (caffeinate) stopped unexpectedly, so YOLO has ended."
   if (( YOLO_PREV )); then
     print -r -- "Sleep was already turned off before YOLO, so it stays off. To turn it on: sleeptimer yolo off"
-  else
+  elif wait_sleep_state 0; then
+    rm -f $(yolo_marker)
     print -r -- "Your Mac can sleep again."
+  else
+    print -u2 "Sleep is still turned off. To turn it back on: sleeptimer yolo off"
+    exit 1
   fi
+  (( YOLO_LOST )) && exit 1
   exit 0
 }
 
@@ -459,6 +650,7 @@ yolo_off() {
   fi
   print -r -- "Turning sleep back on needs your admin password (runs: pmset -a disablesleep 0)."
   sudo pmset -a disablesleep 0 || { print -u2 "Couldn't turn sleep back on."; return 1 }
+  rm -f $(yolo_marker)
   print "Sleep is back on."
 }
 
@@ -472,7 +664,9 @@ Usage:
   sleeptimer themes <name>   switch theme: ${(j:, :)THEME_NAMES}
   sleeptimer yolo            keep the Mac awake, even with the lid closed, until Ctrl+C
   sleeptimer yolo off        turn sleep back on if it got stuck off
+  sleeptimer --yolo          same as sleeptimer yolo
   sleeptimer -h              show this help
+  sleeptimer --version       show the version
 
 Times:
   A number without a unit uses the unit you used last time (minutes at first).
@@ -512,10 +706,12 @@ main() {
   case $1 in
     -h|--help|help) usage; return 0 ;;
     themes) shift; themes_cmd "$@"; return ;;
-    yolo) shift; yolo_cmd "$@"; return ;;
+    yolo|--yolo) shift; yolo_cmd "$@"; return ;;
+    -v|--version|version) print -r -- "sleeptimer $VERSION"; return 0 ;;
     -*) print -u2 "Unknown option: $1 (try: sleeptimer -h)"; return 2 ;;
   esac
-  trap cancel INT TERM HUP
+  trap cancel INT TERM QUIT
+  trap hangup HUP
   local parsed secs rc
   if (( $# )); then
     parsed=$(parse_duration "$*" $CFG_UNIT); rc=$?
@@ -527,17 +723,27 @@ main() {
       return 1
     fi
   else
-    parsed=$(ask_duration) || { print; return 1 }
+    parsed=$(ask_duration) || { (( $? == 129 )) && hangup; print; return 1 }
   fi
   secs=${parsed% *} CFG_UNIT=${parsed#* } CFG_LAST=${parsed% *}
   save_config
   print -r -- "Sleeping in $(fmt_time $secs) ($(describe_duration $secs))."
   print -r -- "Goes to sleep at $(fmt_clock $(( EPOCHSECONDS + secs ))). Ctrl+C to cancel."
+  ask_media_permission
   if (( $(sleep_disabled) )); then
     print -u2 "Heads up: sleep is turned off system-wide, so your Mac may stay awake when the timer ends. To fix it: sleeptimer yolo off"
     use_tui && sleep 3  # give the warning time to be read before full screen covers it
   fi
-  countdown $secs
+  countdown $secs; local late=$?
+  # Time is up: finish pause + mute + sleep as one step, never half of it. Ctrl+Z, a closed window or a
+  # closed pipe can't stop it midway either (an fg hours later would sleep the Mac by surprise).
+  trap '' INT TERM QUIT HUP TSTP TTIN TTOU PIPE
+  kill_jobs  # the permission query has had the whole countdown
+  case $late in
+    1) print -r -- "Time ran out while your Mac was asleep, so it won't go to sleep now."; return 3 ;;
+    2) print -r -- "The timer ended late, so it won't put your Mac to sleep now."; return 3 ;;
+  esac
+  print -r -- "Time's up: pausing, muting and putting your Mac to sleep."
   go_to_sleep
 }
 
