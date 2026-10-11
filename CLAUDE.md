@@ -30,6 +30,7 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
   - **Full screen** is used when stdout is a TTY. It uses the alternate screen, big digits, and a bar filling all remaining rows. `render_screen` must return exactly `rows` lines, none wider than `cols`; a wrapped line scrolls and garbles the redraw.
   - **One-line `render_bar`** is used otherwise.
   - `cancel` (trapped on INT/TERM/HUP) must call `screen_leave` before exiting 130.
+- **YOLO mode** (`sleeptimer yolo`) is the opposite of the timer. `caffeinate -dims -w $$` blocks normal sleep. Lid-close sleep needs root: a `nohup sudo -n zsh -c "$(yolo_guard …)"` guard sets `pmset -a disablesleep 1` and polls the script's pid, then writes back the *previous* `SleepDisabled` value (`sleep_disabled`). Never replace the polling with a trap, because it must survive `kill -9` and closed windows. Tests use fake `sudo`/`pmset`/`caffeinate` in `$fake_bin` (log: `$FAKE_LOG`) and must never call the real ones.
 
 ## Test hooks (environment variables)
 
@@ -43,6 +44,8 @@ There is no build, lint or test framework. Tests are plain zsh using `assert_eq 
 | `SLEEPTIMER_BAR_WIDTH` | One-line bar width |
 
 Tests call `apply_theme classic` so expected strings are plain `#`/`-` with no escape codes.
+
+Fake-command env for YOLO tests: `STUB_SLEEP_DISABLED` (what `pmset -g` reports) and `STUB_SUDO_RC` (non-zero makes every fake `sudo` fail).
 
 ## zsh gotchas that have bitten this code
 
