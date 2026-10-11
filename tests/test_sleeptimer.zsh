@@ -24,17 +24,21 @@ assert_fails() {  # assert_fails <name> <cmd...>
   fi
 }
 
-# Fake sudo / pmset / caffeinate, so no test ever changes real power settings.
+# Fake sudo / pmset / caffeinate / osascript / pgrep, so no test ever changes real power settings or pauses real apps.
 # The fake pmset remembers "disablesleep N" in $FAKE_STATE; until then "pmset -g" reports $STUB_SLEEP_DISABLED.
 # STUB_SUDO_RC != 0 makes every sudo call fail; STUB_SUDO_N_RC != 0 fails only "sudo -n" (background guard).
 # The fake sudo points the guard's fixed PATH at the fakes. Every call is appended to $FAKE_LOG.
+# STUB_OSASCRIPT_RC sets osascript's exit code, STUB_OSASCRIPT_HANG=1 makes it hang; STUB_SLEEPNOW_RC sets
+# "pmset sleepnow"'s; STUB_RUNNING lists the apps the fake pgrep reports as running.
 fake_bin=$(mktemp -d)
 export FAKE_BIN=$fake_bin FAKE_LOG=$fake_bin/calls.log FAKE_STATE=$fake_bin/state
 export STUB_SLEEP_DISABLED=0 STUB_SUDO_RC=0 STUB_SUDO_N_RC=0
+export STUB_OSASCRIPT_RC=0 STUB_OSASCRIPT_HANG=0 STUB_SLEEPNOW_RC=0 STUB_RUNNING=
 print -l '#!/bin/sh' \
   'if [ "$1" = "-g" ]; then v=$(cat "$FAKE_STATE" 2>/dev/null || echo "$STUB_SLEEP_DISABLED")' \
   '  printf "System-wide power settings:\n SleepDisabled\t\t%s\nCurrently in use:\n sleep 1\n" "$v"; exit 0; fi' \
   'echo "pmset $*" >> "$FAKE_LOG"' \
+  '[ "$1" = "sleepnow" ] && exit "$STUB_SLEEPNOW_RC"' \
   '[ "$2" = "disablesleep" ] && echo "$3" > "$FAKE_STATE"' \
   'exit 0' > $fake_bin/pmset
 print -l '#!/bin/sh' \
@@ -45,7 +49,19 @@ print -l '#!/bin/sh' \
   'if [ "$1" = "/bin/zsh" ]; then exec zsh "$2" "$3" "$(printf %s "$4" | sed "s#PATH=/usr/bin#PATH=$FAKE_BIN:/usr/bin#")"; fi' \
   'exec "$@"' > $fake_bin/sudo
 print -l '#!/bin/sh' 'echo "caffeinate $*" >> "$FAKE_LOG"' > $fake_bin/caffeinate
+print -l '#!/bin/sh' \
+  'echo "osascript $*" >> "$FAKE_LOG"' \
+  '[ "$STUB_OSASCRIPT_HANG" = 1 ] && exec sleep 30' \
+  'exit "$STUB_OSASCRIPT_RC"' > $fake_bin/osascript
+print -l '#!/bin/sh' \
+  'for app in $STUB_RUNNING; do [ "$app" = "$2" ] && exit 0; done' \
+  'exit 1' > $fake_bin/pgrep
 chmod +x $fake_bin/*
+
+# Tests that run the real pause/mute/sleep code use path=($fake_bin /bin). That is only safe while /bin
+# holds none of the real tools, so stop everything if it ever does.
+[[ -z $(path=(/bin); whence -p pmset osascript pgrep caffeinate sudo media-control) ]] ||
+  { print "ABORT: /bin has a real pmset/osascript/pgrep/caffeinate/sudo/media-control; tests would touch the system"; exit 1 }
 
 # parse_duration: bare number uses the default unit; inline unit overrides it
 assert_eq "parse bare uses default" "2700 m" "$(parse_duration 45 m)"
@@ -207,18 +223,59 @@ assert_eq "term_size override" "100 40" "$(SLEEPTIMER_COLS=100 SLEEPTIMER_ROWS=4
 # go_to_sleep dry run never touches the system
 assert_eq "go_to_sleep dry run" "DRY RUN: pause + mute + sleep" "$(SLEEPTIMER_DRY_RUN=1 go_to_sleep)"
 
-# pause_media: calls `media-control pause` via a stub on PATH; never fails
+# with_timeout: passes the exit status through; kills a hung command
+assert_eq "with_timeout passes status" "0 1 7" \
+  "$(with_timeout 2 true; a=$?; with_timeout 2 false; b=$?; with_timeout 2 sh -c 'exit 7'; print "$a $b $?")"
+t0=$EPOCHSECONDS
+assert_eq "with_timeout kills hung command" "124" "$(with_timeout 1 sleep 10; print $?)"
+assert_eq "with_timeout is quick" "yes" "$( (( EPOCHSECONDS - t0 <= 3 )) && print yes )"
+
+# pause_media: "Now Playing" via media-control, plus Music/Spotify directly when they're running; never fails.
+# path=(... $fake_bin /bin): fake pgrep/osascript only, so the tests never pause or open real apps.
 stub_dir=$(mktemp -d)
 print -l '#!/bin/sh' 'echo "$@" > "$STUB_LOG"; exit 1' > $stub_dir/media-control
 chmod +x $stub_dir/media-control
 export STUB_LOG=$stub_dir/log
-( path=($stub_dir $path); pause_media )
+( path=($stub_dir $fake_bin /bin); pause_media )
 assert_eq "pause_media sends pause" "pause" "$(<$STUB_LOG)"
-assert_eq "pause_media ignores tool failure" "0" "$( path=($stub_dir $path); pause_media; print $? )"
-assert_eq "pause_media missing tool ok" "0" "$( path=(/nonexistent); pause_media 2>/dev/null; print $? )"
+assert_eq "pause_media ignores tool failure" "0" "$( path=($stub_dir $fake_bin /bin); pause_media; print $? )"
+assert_eq "pause_media missing tool ok" "0" "$( path=($fake_bin /bin); pause_media 2>/dev/null; print $? )"
 assert_eq "pause_media missing tool tip" "yes" \
-  "$( path=(/nonexistent); [[ $(pause_media 2>&1) == *'brew install media-control'* ]] && print yes )"
+  "$( path=($fake_bin /bin); [[ $(pause_media 2>&1) == *'brew install media-control'* ]] && print yes )"
+: > $FAKE_LOG
+( path=($fake_bin /bin); export STUB_RUNNING='Music Spotify'; pause_media 2>/dev/null )
+assert_eq "pause_media pauses Music and Spotify" \
+  'osascript -e tell application "Music" to pause
+osascript -e tell application "Spotify" to pause' "$(<$FAKE_LOG)"
+: > $FAKE_LOG
+( path=($fake_bin /bin); export STUB_RUNNING=; pause_media 2>/dev/null )
+assert_eq "pause_media never opens apps" "" "$(<$FAKE_LOG)"
+: > $FAKE_LOG; rm -f $STUB_LOG
+( path=($stub_dir $fake_bin /bin); export STUB_RUNNING=Music; pause_media )
+assert_eq "pause_media both ways" "yes" \
+  "$([[ $(<$STUB_LOG) == pause && $(<$FAKE_LOG) == *'"Music" to pause'* ]] && print yes)"
+t0=$EPOCHSECONDS
+( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1; pause_media 2>/dev/null )
+assert_eq "pause_media gives up on a hung app" "yes" "$( (( EPOCHSECONDS - t0 <= 5 )) && print yes )"
+: > $FAKE_LOG
 rm -rf $stub_dir
+
+# ask_media_permission: a harmless query to open apps at the START, so macOS's one-time
+# "Terminal wants to control Music" question shows up while the user is awake, not at sleep time
+( path=($fake_bin /bin); export STUB_RUNNING='Music Spotify'; ask_media_permission ); sleep 0.5
+assert_eq "permission asked at start" \
+  'osascript -e tell application "Music" to get player state
+osascript -e tell application "Spotify" to get player state' "$(sort $FAKE_LOG)"
+: > $FAKE_LOG
+( path=($fake_bin /bin); export STUB_RUNNING=; ask_media_permission ); sleep 0.5
+assert_eq "permission never opens apps" "" "$(<$FAKE_LOG)"
+( path=($fake_bin /bin); export STUB_RUNNING=Music SLEEPTIMER_DRY_RUN=1; ask_media_permission ); sleep 0.5
+assert_eq "permission skipped in dry run" "" "$(<$FAKE_LOG)"
+t0=$EPOCHSECONDS
+( path=($fake_bin /bin); export STUB_RUNNING=Music STUB_OSASCRIPT_HANG=1; ask_media_permission )
+assert_eq "permission doesn't wait for an answer" "yes" "$( (( EPOCHSECONDS - t0 <= 1 )) && print yes )"
+sleep 0.5  # let that background fake log its call before the log is cleared below
+: > $FAKE_LOG
 
 # end-to-end: executed script, dry run, compact mode
 run() { PATH=$fake_bin:$PATH SLEEPTIMER_DRY_RUN=1 SLEEPTIMER_TUI=0 zsh $SCRIPT "$@" }
@@ -232,6 +289,8 @@ e2e=$(print 1 | run 2>/dev/null)
 assert_eq "e2e bare number uses remembered unit" "yes" "$([[ $e2e == *'Sleeping in 00:01'* ]] && print yes)"
 e2e=$(run 1s 2>/dev/null </dev/null)
 assert_eq "e2e argument skips prompt" "yes" "$([[ $e2e == *'DRY RUN'* ]] && print yes)"
+assert_eq "e2e dry run asks no permission" "" \
+  "$(: > $FAKE_LOG; STUB_RUNNING=Music run 1s >/dev/null 2>&1; cat $FAKE_LOG)"
 assert_eq "e2e bad argument exit" "1" "$(run banana >/dev/null 2>&1; print $?)"
 assert_eq "e2e bad argument hint" "yes" "$([[ $(run banana 2>&1) == *'sleeptimer -h'* ]] && print yes)"
 assert_eq "e2e too long explains" "yes" "$([[ $(run 25h 2>&1) == *'longer than 24 hours'* ]] && print yes)"

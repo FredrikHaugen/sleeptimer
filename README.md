@@ -77,8 +77,13 @@ Paste this into Terminal and press **Return**:
 brew install media-control
 ```
 
-If you skip this step, sleeptimer still mutes the sound and puts the Mac to
-sleep, but it doesn't pause anything.
+If you skip this step, sleeptimer still pauses **Apple Music** and **Spotify**,
+mutes the sound and puts the Mac to sleep. It just can't pause YouTube and
+other players.
+
+If Apple Music or Spotify is open when you start a timer, macOS may ask once
+whether **Terminal** may control it. Click **OK**, so the timer can pause it
+later while you sleep. It only asks this the first time.
 
 You're done with setup. You can delete the ZIP and the `sleeptimer-master`
 folder from Downloads if you like.
@@ -190,8 +195,8 @@ click the speaker icon at the top of the screen.
 | Colors look strange | Try `sleeptimer themes classic`. |
 | `Heads up: sleep is turned off system-wide` | Something (YOLO, or another keep-awake app) switched sleep off, so the timer may not be able to put the Mac to sleep. Type `sleeptimer yolo off` to switch it back on. |
 | The timer stopped by itself | The Terminal window was probably closed. Start it again and leave the window open. |
-| `Tip: brew install media-control ...` when the timer ends | Nothing was paused because Step 4 was skipped. Do **Step 4** if you want pausing. |
-| Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. |
+| `Tip: brew install media-control ...` when the timer ends | Only Apple Music and Spotify were paused, because Step 4 was skipped. Do **Step 4** to pause YouTube and other players too. |
+| Music or video didn't pause | Only players that show in the Mac's **Now Playing** control (in Control Center) can be paused. For Apple Music or Spotify, check **System Settings → Privacy & Security → Automation** and allow Terminal to control them. |
 | I want a different time | Press **Control + C** to cancel, then run `sleeptimer` again. |
 
 ---
@@ -225,7 +230,13 @@ When the timer ends, it runs exactly:
 
 ```
 media-control pause   # skipped (with a tip) if media-control isn't installed; errors ignored
+osascript -e 'tell application "Music" to pause'     # only if Music is open
+osascript -e 'tell application "Spotify" to pause'   # only if Spotify is open
 osascript -e "set volume with output muted" && pmset sleepnow
 ```
+
+Each pause is given 3 seconds, then skipped, so a hung app can't keep the Mac awake.
+When the timer starts, open Music and Spotify get a harmless `get player state`
+query, so macOS asks for the one-time Automation permission while you're awake.
 
 </details>
