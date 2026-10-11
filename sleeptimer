@@ -25,6 +25,14 @@ typeset -A THEMES=(
 )
 DEFAULT_THEME=night
 
+# Big-digit font: 5 rows per glyph, "#" = lit cell.
+typeset -A GLYPHS=(
+  0 '###|# #|# #|# #|###'  1 '  #|  #|  #|  #|  #'  2 '###|  #|###|#  |###'
+  3 '###|  #|###|  #|###'  4 '# #|# #|###|  #|  #'  5 '###|#  |###|  #|###'
+  6 '###|#  |###|# #|###'  7 '###|  #|  #|  #|  #'  8 '###|# #|###|# #|###'
+  9 '###|# #|###|  #|###'  : ' |#| |#| '
+)
+
 # parse_duration <text> <default-unit> — prints "<seconds> <unit>"; returns 1 on invalid input.
 # Accepts "45", "45m", "1,25h", "1.5 hours", ".5h", "90 sec". Comma or dot, up to 3 decimals.
 parse_duration() {
@@ -126,6 +134,68 @@ render_bar() {
   local pct=$(( elapsed * 100 / total ))
   local filled=$(( elapsed * width / total ))
   printf '[%s] %3d%%  %s left' "$(bar_cells $filled $(( width - filled )))" $pct "$(fmt_time $(( total - elapsed )))"
+}
+
+# big_width <text> — width in cells of <text> drawn with GLYPHS (one blank cell between glyphs).
+big_width() {
+  local c w=-1
+  for c in ${(s::)1}; do (( w += ${#${GLYPHS[$c]%%|*}} + 1 )); done
+  print $w
+}
+
+# render_big <text> <scale> — <text> in big digits: 5*scale lines, each cell 2*scale columns wide.
+render_big() {
+  local text=$1 scale=$2 r c line
+  local on=${(pl:$(( 2 * scale ))::$FILL:)} off=${(l:$(( 2 * scale )):: :)}
+  local -a glyph
+  for r in {1..5}; do
+    line=
+    for c in ${(s::)text}; do
+      glyph=("${(@s:|:)GLYPHS[$c]}")
+      line+="$glyph[r] "
+    done
+    line=${${line% }// /$off}
+    line=${line//\#/$on}
+    repeat $scale print -r -- "$line"
+  done
+}
+
+# render_screen <elapsed> <total> <cols> <rows> <end-epoch> <now> — one full-screen frame.
+# Exactly <rows> lines, none wider than <cols>. Below 30x8 it falls back to one short line.
+render_screen() {
+  local elapsed=$1 total=$2 cols=$3 rows=$4 end=$5 now=$6
+  (( elapsed > total )) && elapsed=$total
+  local left=$(( total - elapsed )) pct=$(( elapsed * 100 / total ))
+  local clock=$(fmt_time $left)
+  if (( cols < 30 || rows < 8 )); then
+    local short="$pct%  $clock left"
+    print -rn -- ${short[1,cols]}
+    return
+  fi
+  local inner=$(( cols - 4 )) bw=$(big_width $clock) scale=0 s line i
+  local -a info=(
+    "$pct%  ·  $clock left  ·  sleeps at $(fmt_clock $end $now)"
+    "$(describe_duration $total)"
+    "Ctrl+C to cancel"
+  ) tint=("$C_ACCENT" "" "$C_DIM") lines=("")
+  # Biggest clock that fits across and leaves at least 2 bar rows: 1 top + 5s + 1 gap + bar + 1 gap + 3 info.
+  for s in 3 2 1; do
+    (( bw * 2 * s <= inner && rows - 5 * s - 6 >= 2 )) && { scale=$s; break }
+  done
+  if (( scale )); then
+    local pad=${(l:$(( (cols - bw * 2 * scale) / 2 )):: :)}
+    for line in "${(@f)$(render_big $clock $scale)}"; do lines+=("$pad$C_ACCENT$line$C_RESET"); done
+    lines+=("")
+  fi
+  local filled=$(( elapsed * inner / total ))
+  local bar="  $(bar_cells $filled $(( inner - filled )))"
+  repeat $(( rows - $#lines - 4 )) lines+=("$bar")
+  lines+=("")
+  for i in {1..$#info}; do
+    line=${info[i][1,cols]}
+    lines+=("${(l:$(( (cols - $#line) / 2 )):: :)}$tint[i]$line${tint[i]:+$C_RESET}")
+  done
+  print -rn -- "${(pj:\n:)lines}"
 }
 
 # load_config — read unit/theme/last from $CONFIG into CFG_*; missing or bad values keep the defaults.

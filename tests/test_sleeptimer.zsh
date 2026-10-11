@@ -116,6 +116,39 @@ assert_eq "prompt with last" "How long? (hours; Enter = 1.25 hours): " "$(durati
 assert_fails "ask EOF" ask_duration </dev/null
 CFG_UNIT=m CFG_LAST=0
 
+# render_big / big_width
+assert_eq "big_width 22:30"   "17" "$(big_width 22:30)"
+assert_eq "big_width 1:15:00" "23" "$(big_width 1:15:00)"
+assert_eq "render_big 1:0" \
+  "    ##      ######
+    ##  ##  ##  ##
+    ##      ##  ##
+    ##  ##  ##  ##
+    ##      ######" \
+  "$(render_big 1:0 1 | sed 's/ *$//')"
+assert_eq "render_big scale 2 rows" "10" "$(render_big 7 2 | wc -l | tr -d ' ')"
+
+# render_screen: fills the terminal exactly, never wider than it
+frame_ok() {  # frame_ok <cols> <rows> — prints "<lines> <widest>"
+  local out=$(TZ=UTC render_screen 30 60 $1 $2 3600 0) l w=0
+  for l in "${(@f)out}"; do (( $#l > w )) && w=$#l; done
+  print "${#${(@f)out}} $w"
+}
+assert_eq "screen 60x20 size"   "20 58"  "$(frame_ok 60 20)"
+assert_eq "screen 200x50 size"  "50 198" "$(frame_ok 200 50)"
+assert_eq "screen 30x8 size"    "8 30"   "$(frame_ok 30 8)"
+screen=$(TZ=UTC render_screen 30 60 60 20 3600 0)
+assert_eq "screen bar spans width" "yes" \
+  "$( [[ $screen == *'  '${(l:28::#:)}${(l:28::-:)}* ]] && print yes )"
+assert_eq "screen shows sleep time" "yes" "$( [[ $screen == *'sleeps at 01:00'* ]] && print yes )"
+assert_eq "screen shows units" "yes" \
+  "$( [[ $screen == *'60 seconds = 1 minute = 0.02 hours'* ]] && print yes )"
+assert_eq "screen has big clock" "yes" "$( [[ $screen == *'######  ######'* ]] && print yes )"
+assert_eq "screen no clock when short" "no" \
+  "$( [[ $(TZ=UTC render_screen 30 60 60 10 3600 0) == *'######  ######'* ]] && print yes || print no )"
+assert_eq "screen tiny fallback" "50%  00:30 left" "$(render_screen 30 60 20 5 3600 0)"
+assert_eq "screen tiny truncates" "50%  00:" "$(render_screen 30 60 8 5 3600 0)"
+
 # countdown: wall-clock based, so a 0.3s tick still finishes ~on time and ends at 100%
 TICK=0.3
 t0=$EPOCHSECONDS
